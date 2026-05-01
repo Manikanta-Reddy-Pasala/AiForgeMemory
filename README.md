@@ -257,6 +257,182 @@ b.runbook_md  # → str
 
 ---
 
+## Configuration — single yaml per repo
+
+Create `.aiforge/codemem.yaml` at the repo root. All fields optional; env vars are fallback.
+
+```yaml
+repo:
+  name: my-app                                # logical name (Repo.name in Neo4j)
+  path: /home/me/codeRepo/my-app
+
+knowledge:                                    # additional docs to surface in bundles
+  readmes:
+    - README.md
+    - docs/ARCHITECTURE.md
+    - docs/RUNBOOK.md
+  conventions:
+    - .aiforge/CONVENTIONS.md
+  exclude:
+    - target/**
+    - vendor/**
+
+services_yaml: .aiforge/services.yaml         # operator catalog (skips slow LLM Stage 3)
+
+ingest:
+  skip_services: false
+  skip_symbols:  false
+  skip_summaries: false                       # Stage 6 (set true if rate-limited)
+  skip_chunks:   false                        # Stage 7
+  file_summary_max_bytes: 32768
+  embed_max_bytes:        65536
+
+llm:
+  url: http://127.0.0.1:1234/v1               # LM Studio / Ollama / etc.
+  model: /path/to/Qwen3-Coder-Next-MLX-4bit
+  api_key: lm-studio
+  repo_summary_max_tokens: 8000
+
+embed:
+  url: http://127.0.0.1:8764                  # bge-m3 sidecar
+
+neo4j:
+  uri: bolt://127.0.0.1:7687
+  user: neo4j
+  password: password
+```
+
+Auto-loaded by `aiforge-memory ingest` and the `RepoConfig.load()` helper. Env vars (e.g. `AIFORGE_NEO4J_URI`) win over yaml when both set — useful for CI overrides.
+
+---
+
+## How to use it (after install)
+
+```bash
+# 1. install + verify infra
+make install
+make doctor
+
+# 2. drop a config + (optional) services.yaml in your repo
+mkdir -p ~/codeRepo/my-app/.aiforge
+cat > ~/codeRepo/my-app/.aiforge/codemem.yaml <<EOF
+repo:
+  name: my-app
+EOF
+
+# 3. ingest
+aiforge-memory ingest my-app --path ~/codeRepo/my-app
+
+# 4. verify
+aiforge-memory stats my-app
+aiforge-memory services my-app
+```
+
+---
+
+## How to query
+
+### From Python
+
+```python
+from aiforge_memory.api.read import context_bundle_for
+md = context_bundle_for("which api saves sales data", repo="my-app")
+print(md)
+```
+
+### From CLI (planned, currently via Python REPL)
+
+```python
+from aiforge_memory.query import bundle
+from neo4j import GraphDatabase
+
+drv = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j","password"))
+b = bundle.query("fix payment processing", repo="my-app", driver=drv)
+print(b.render())
+```
+
+### Query types it answers
+
+| Question shape | What lights up |
+|---|---|
+| `Class.method` literal | fastpath → exact symbol lookup |
+| `TICKET-123` | fastpath → ticket history join |
+| `path/to/file.ext` | fastpath → file lookup + neighbours |
+| "which api saves X" | translator: vector + **fulltext** → LLM grounds → top symbols |
+| "how do I run/test" | Repo runbook block |
+| "which services consume Y" | Service catalog + DEPENDS_ON traversal |
+
+---
+
+## How to teach it more
+
+The graph improves automatically as you ingest. To boost quality manually:
+
+1. **Operator-curated services** (`.aiforge/services.yaml`)
+   ```yaml
+   services:
+     - name: payment_api
+       description: "Payment processing REST endpoints"
+       role: api
+       file_glob: src/main/java/com/co/payment/**/*.java
+   ```
+   `source: 'manual'` services stick on re-ingest; LLM-extracted ones can drop.
+
+2. **Knowledge files** (`knowledge.readmes` / `conventions` in `codemem.yaml`)
+   Each listed file gets prepended to the bundle's runbook section.
+
+3. **Re-run Stage 6** after major refactors
+   ```bash
+   aiforge-memory ingest my-app --force          # re-summarize all changed files
+   ```
+
+4. **Custom queries during dev**
+   ```python
+   bundle.query("which methods publish to NATS subject business.push", repo="...")
+   ```
+   Refines the catalog as the LLM picks symbols you already cared about.
+
+---
+
+## Cross-repo links (planned, edge reserved)
+
+The graph reserves `Repo -[CALLS_REPO]-> Repo` for cross-repo intelligence.
+
+### Today (v0.1)
+
+Each repo is its own connected component. `Service` nodes are scoped per-`Repo.name`. Same `Service` name in two repos = two distinct nodes.
+
+### Roadmap
+
+The cross-repo edge is populated by a separate post-ingest pass that scans:
+
+1. **HTTP client calls** — when `RepoA` has `restTemplate.post("/v1/payments/...")` and `RepoB` exposes `@RequestMapping("/v1/payments")`, emit `(RepoA)-[:CALLS_REPO {via:'http', endpoint:'/v1/payments'}]->(RepoB)`.
+
+2. **NATS subjects** — when `RepoA` publishes `business.push.request` and `RepoB` consumes it, emit `(RepoA)-[:CALLS_REPO {via:'nats', subject:'business.push.request'}]->(RepoB)`.
+
+3. **Database collection sharing** — `RepoA` writes to MongoDB collection `X`, `RepoB` reads it → emit edge with `via:'shared_collection'`.
+
+To run today (manual recipe; will become a CLI subcommand `aiforge-memory link`):
+
+```python
+# Pseudocode — see docs/cross-repo-link.md (TBD)
+from neo4j import GraphDatabase
+drv = GraphDatabase.driver(...)
+
+# 1. find HTTP endpoints exposed by each Repo (Symbol.signature regex)
+# 2. find HTTP client calls (call site signature regex)
+# 3. match by URI substring → emit CALLS_REPO edge
+```
+
+This is a bonus stage (Plan 11 in the design spec). Until it ships, single-repo answers are still strong because:
+
+- `Service.tech_stack` and `Service.description` carry enough hint that an LLM agent can pick the right service catalog when given multiple repos as candidates.
+- Operators can hand-write `services.yaml` entries that reference external repos by name (e.g. `description: "consumes business.push.request from PosClientBackend"`).
+
+When you land Plan 11, every existing graph automatically becomes a multi-repo knowledge graph — no re-ingest needed.
+
+---
+
 ## Coexistence
 
 If your Neo4j already hosts another tool's `:File` or `:Symbol`, AiForgeMemory uses `_v2`-suffixed labels (`File_v2`, `Symbol_v2`, `Chunk_v2`) so there's zero collision. Drop the suffix in a single migration when you're ready.

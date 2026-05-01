@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from aiforge_memory.ingest import flow
 from aiforge_memory.store import schema, state_db as sdb
@@ -28,19 +29,32 @@ def _driver():
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
+    from aiforge_memory.config import RepoConfig
+
+    repo_path = args.path or os.getcwd()
+    cfg = RepoConfig.load(repo_path, name=args.repo)
+    cfg.apply_to_env()  # so legacy modules pick up overrides
+
     drv = _driver()
     schema.apply(drv)
     state = sdb.open_db()
     sdb.migrate(state)
     res = flow.ingest_repo(
-        repo_name=args.repo,
-        repo_path=args.path or os.getcwd(),
+        repo_name=cfg.name,
+        repo_path=cfg.path,
         driver=drv,
         state_conn=state,
         force=args.force,
+        skip_services=cfg.skip_services,
+        skip_symbols=cfg.skip_symbols,
+        skip_summaries=cfg.skip_summaries,
+        skip_chunks=cfg.skip_chunks,
     )
     print(json.dumps({
         "status": res.status, "pack_sha": res.pack_sha, "repo": res.repo,
+        "config_loaded_from": str(
+            (Path(repo_path) / ".aiforge" / "codemem.yaml").resolve()
+        ),
     }))
     return 0
 
