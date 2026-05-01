@@ -36,18 +36,29 @@ _EXT_LANG: dict[str, str] = {
     ".js": "javascript",
 }
 
+# Documentation extensions — no tree-sitter parse, but still walked +
+# embedded so README/CLAUDE.md/ADRs/CHANGELOG end up in Chunk_v2 and
+# vector search can hit them.
+_DOC_EXT: dict[str, str] = {
+    ".md":   "doc-md",
+    ".rst":  "doc-rst",
+    ".adoc": "doc-adoc",
+    ".txt":  "doc-txt",
+}
+
 # Skip these directories when walking — don't index build artifacts.
 _SKIP_DIRS = {
     ".git", ".venv", "venv", "node_modules", "target", "build", "dist",
     "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
     ".idea", ".vscode", ".DS_Store",
+    ".aiforge", ".aiforge-worktrees", "graphify-out",
 }
 
 
 @dataclass
 class WalkedSymbol:
     fqname: str
-    kind: str               # "class" | "interface" | "method" | "function"
+    kind: str               # class | interface | enum | annotation | method | function | field
     file_path: str
     signature: str = ""
     doc_first_line: str = ""
@@ -68,7 +79,12 @@ class WalkedFile:
 
 
 def lang_for(path: str | Path) -> str | None:
-    return _EXT_LANG.get(Path(path).suffix.lower())
+    suf = Path(path).suffix.lower()
+    return _EXT_LANG.get(suf) or _DOC_EXT.get(suf)
+
+
+def is_doc(path: str | Path) -> bool:
+    return Path(path).suffix.lower() in _DOC_EXT
 
 
 def walk_repo(repo_path: str | Path, *, repo: str) -> list[WalkedFile]:
@@ -76,7 +92,8 @@ def walk_repo(repo_path: str | Path, *, repo: str) -> list[WalkedFile]:
     out: list[WalkedFile] = []
     for path in _iter_source_files(repo_path):
         rel = str(path.relative_to(repo_path))
-        lang = lang_for(rel)
+        suf = Path(rel).suffix.lower()
+        lang = _EXT_LANG.get(suf) or _DOC_EXT.get(suf)
         try:
             data = path.read_bytes()
         except (OSError, ValueError):
@@ -85,7 +102,9 @@ def walk_repo(repo_path: str | Path, *, repo: str) -> list[WalkedFile]:
         lines = data.count(b"\n") + 1
         wf = WalkedFile(repo=repo, path=rel, hash=sha,
                         lang=lang or "other", lines=lines)
-        if lang is not None:
+        # Code → tree-sitter parse for symbols/imports.
+        # Docs → no parse; just walk so the embedder picks them up.
+        if suf in _EXT_LANG:
             try:
                 _parse_into(wf, data, lang)
             except Exception:
@@ -100,7 +119,8 @@ def _iter_source_files(root: Path):
             continue
         if not p.is_file():
             continue
-        if p.suffix.lower() in _EXT_LANG:
+        suf = p.suffix.lower()
+        if suf in _EXT_LANG or suf in _DOC_EXT:
             yield p
 
 
@@ -115,6 +135,10 @@ def _parse_into(wf: WalkedFile, source: bytes, lang: str) -> None:
     cursor = QueryCursor(query)
 
     classes: list[tuple[str, object]] = []
+    interfaces: list[tuple[str, object]] = []
+    enums: list[tuple[str, object]] = []
+    annotations: list[tuple[str, object]] = []
+    fields: list[tuple[str, object]] = []
     methods: list[tuple[str, object]] = []
     functions: list[tuple[str, object]] = []
     imports: list[str] = []
@@ -127,6 +151,18 @@ def _parse_into(wf: WalkedFile, source: bytes, lang: str) -> None:
         if "class.def" in caps and "class.name" in caps:
             for d, n in zip(caps["class.def"], caps["class.name"]):
                 classes.append((_text(n, source), d))
+        elif "interface.def" in caps and "interface.name" in caps:
+            for d, n in zip(caps["interface.def"], caps["interface.name"]):
+                interfaces.append((_text(n, source), d))
+        elif "enum.def" in caps and "enum.name" in caps:
+            for d, n in zip(caps["enum.def"], caps["enum.name"]):
+                enums.append((_text(n, source), d))
+        elif "annotation.def" in caps and "annotation.name" in caps:
+            for d, n in zip(caps["annotation.def"], caps["annotation.name"]):
+                annotations.append((_text(n, source), d))
+        elif "field.def" in caps and "field.name" in caps:
+            for d, n in zip(caps["field.def"], caps["field.name"]):
+                fields.append((_text(n, source), d))
         elif "method.def" in caps and "method.name" in caps:
             for d, n in zip(caps["method.def"], caps["method.name"]):
                 methods.append((_text(n, source), d))
@@ -140,23 +176,46 @@ def _parse_into(wf: WalkedFile, source: bytes, lang: str) -> None:
             for n in caps["import.from"]:
                 imports.append(_text(n, source))
 
-    # Build owning-class index for methods (by line ranges)
-    class_ranges: list[tuple[int, int, str]] = []
+    # Build owning-type index (class | interface | enum | annotation)
+    # by line ranges so we can attach methods/fields back to their owner.
+    type_ranges: list[tuple[int, int, str]] = []
     for cname, cdef in classes:
-        class_ranges.append((cdef.start_point[0], cdef.end_point[0], cname))
+        type_ranges.append((cdef.start_point[0], cdef.end_point[0], cname))
         wf.symbols.append(_make_symbol(
             wf=wf, name=cname, kind="class", node=cdef, source=source,
         ))
+    for iname, idef in interfaces:
+        type_ranges.append((idef.start_point[0], idef.end_point[0], iname))
+        wf.symbols.append(_make_symbol(
+            wf=wf, name=iname, kind="interface", node=idef, source=source,
+        ))
+    for ename, edef in enums:
+        type_ranges.append((edef.start_point[0], edef.end_point[0], ename))
+        wf.symbols.append(_make_symbol(
+            wf=wf, name=ename, kind="enum", node=edef, source=source,
+        ))
+    for aname, adef in annotations:
+        type_ranges.append((adef.start_point[0], adef.end_point[0], aname))
+        wf.symbols.append(_make_symbol(
+            wf=wf, name=aname, kind="annotation", node=adef, source=source,
+        ))
     for mname, mdef in methods:
-        owner = _enclosing_class(class_ranges, mdef.start_point[0])
+        owner = _enclosing_class(type_ranges, mdef.start_point[0])
         fqname = _fqname(wf.path, mname, parent_class=owner)
         wf.symbols.append(_make_symbol(
             wf=wf, name=mname, kind="method", node=mdef, source=source,
             fqname=fqname,
         ))
+    for fname_, fdef_ in fields:
+        owner = _enclosing_class(type_ranges, fdef_.start_point[0])
+        fqname = _fqname(wf.path, fname_, parent_class=owner)
+        wf.symbols.append(_make_symbol(
+            wf=wf, name=fname_, kind="field", node=fdef_, source=source,
+            fqname=fqname,
+        ))
     for fname, fdef in functions:
         # Skip if it's actually a method (already handled)
-        if _enclosing_class(class_ranges, fdef.start_point[0]):
+        if _enclosing_class(type_ranges, fdef.start_point[0]):
             continue
         wf.symbols.append(_make_symbol(
             wf=wf, name=fname, kind="function", node=fdef, source=source,
