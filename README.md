@@ -119,18 +119,42 @@ Status today: **81 / 81 green.**
 
 ---
 
-## Real-service smoke
+## Real-service smoke (PosClientBackend, 5,040 Java files)
 
-PosClientBackend (5,040 Java files):
+| Stage | Wall | Output |
+|---|---|---|
+| 1 Pack (RepoMix) | 4 s | 27.2 M chars |
+| 2 Repo summary (Qwen-Coder) | 55 s | runbook + build/test/run cmds |
+| 3 Services (yaml override + glob) | <1 s | 6 services, 49 file edges |
+| 4 Symbols (tree-sitter) | ~3 min | 25,920 symbols (5,380 classes + 20,540 methods) |
+| 5 CALLS (Maven path resolver) | ~3 min | 73,229 edges → 44,940 unique. Confidence: 1.0 → 19% / 0.7 → 30% / 0.4 → 51%. **49% high-conf** thanks to Maven `src/main/java/` path-strip |
+| 5 IMPORTS | (same) | 10,770 edges |
+| 6 File summaries (LLM, 6w concurrent) | 69 min | 4,705 / 4,705 files summarized |
+| 7 Chunk embeddings (8w + /embed_batch) | partial | 691 chunks / 375 files (single-instance bge-m3 is the cap) |
+
+**Real query end-to-end:** 8 s — `"which api used to save sales data"` → returns `sales/SaleService.save` as top symbol on the real PCB graph.
+
+## Translator recall path (two channels)
+
+The translator hydrates LLM-grounding candidates from **both** vector and fulltext, so partial L5 coverage doesn't kill recall:
 
 ```
-Stage 4 (walk):           17.7 s
-Stage 4 (write symbols):  185 s   →  26,220 symbols
-Stage 5 (resolve calls):  20.4 s
-Stage 5 (write CALLS):    192 s   →  73,151 edges (44,862 unique after MERGE)
-                          ────
-                          ~7 min, no LLM needed
+NL query
+   │
+   ├──► /embed (bge-m3) → vector top-K against codemem_chunk_embed
+   │      (semantic match — needs Stage 7 coverage)
+   │
+   └──► Lucene OR-tokens → codemem_symbol_signature_ft
+          (literal-name match — works on every Symbol regardless of L5)
+              │
+              ▼
+       merged candidate set + service catalog
+              │
+              ▼
+       Qwen-Coder JSON-strict grounding (picks from candidates only)
 ```
+
+Fulltext is the safety-net. Without it, "save sales" falls back to whichever ~7% of files happened to be embedded; with it, every `Sale*::save` symbol is reachable.
 
 LLM stages (2, 3, 6) run on a separate cadence.
 
