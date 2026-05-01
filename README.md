@@ -55,18 +55,34 @@ NL text
    ├─ fastpath?  (Class.method | TICKET-123 | path/to/file.ext)
    │     └─ direct Neo4j lookup
    │
-   └─ translator
-        ├─ /embed → vector top-K   (semantic recall)
-        ├─ Lucene fulltext on Symbol fqname/signature  (literal recall)
-        └─ Qwen-Coder JSON-strict grounding (picks from candidate set only)
+   └─ translator (6-stage hybrid retrieval)
+        1. query expansion       (synonyms: auth↔jwt, crud↔controller …)
+        2. vector top-K          (bge-m3 → Cypher chunk index)
+        3. fulltext on symbols   (CamelCase split + Lucene-escaped)
+        4. RRF fusion + path-prior (Controller / Test / Dto cues)
+        5. cross-encoder rerank  (sidecar :8765, top-30 reordered)
+        6. 1-hop graph expansion (IMPORTS in/out for top-5 files)
+              │
+              ▼
+        Qwen-Coder JSON-strict grounding (picks from candidate set only)
               │
               ▼
         Cypher traversal → ContextBundle
 ```
 
-Dual-channel recall — fulltext catches literal-keyword queries even when L5 vector coverage is partial.
+Hybrid recall — RRF-fused embed + Lucene + path-prior survives bad queries; rerank tightens the top; 1-hop catches the rest.
 
-**Real PCB query latency:** 5–8 s end-to-end (translator + bundle).
+**Real PCB query latency:** 9–15 s end-to-end (translator + bundle, rerank+1-hop on).
+**Real PCB recall:** 10/10 NL probes return ≥1 semantically-relevant file (PosClientBackend, post worktree purge).
+
+Tunables (env, default in parens):
+
+| Var | Default | What |
+|---|---|---|
+| `AIFORGE_TRANSLATOR_RERANK` | `1` | enable cross-encoder rerank |
+| `AIFORGE_TRANSLATOR_RERANK_TOPN` | `30` | rerank window |
+| `AIFORGE_TRANSLATOR_RRF_K` | `60` | RRF fusion constant |
+| `AIFORGE_RERANK_URL` | `http://127.0.0.1:8765` | rerank sidecar |
 
 ---
 
@@ -162,19 +178,30 @@ services:
 
 ---
 
-## Real PCB graph (PosClientBackend, 5040 Java files)
+## Real PCB graph (PosClientBackend, 1007 canonical Java files)
 
 | | Count |
 |---|---|
-| Files | 5,040 |
-| Symbols | 25,920 (5,380 classes + 20,540 methods) |
-| IMPORTS | 10,770 |
-| CALLS | 44,940 — 49% high-confidence (1.0 same-file + 0.7 import-aware) |
+| Files | 1,007 (post worktree purge — 4,033 `.aiforge-worktrees/**` dupes removed) |
+| Symbols | 5,174 |
+| Chunks | 2,693 |
+| IMPORTS | populated by tree-sitter walk |
+| CALLS | 49% high-confidence (1.0 same-file + 0.7 import-aware) |
 | Services | 6 (operator yaml) |
-| File summaries | 4,705 |
-| Chunks | 691 (partial; full coverage = ~3 hr embed time) |
 
-Sample query: **"which api used to save sales data"** → `sales/SaleService::save` as top symbol in 8 s.
+Sample probes (real, 10/10 PASS):
+
+| Query | Top file |
+|---|---|
+| "Add ledgerCategory CRUD APIs" | `feature/ledger/LedgerMappingController.java` |
+| "where is the data sync push flow" | `dataSync/PosServerBackendService.java` |
+| "validation rules for sales transaction" | `saga/workflows/SalesWorkflow.java::validateSales` |
+| "where is JWT auth handled" | `feature/login/LogInValidationServiceImpl.java::getUserToken` |
+| "BusinessProductsController endpoints" | exact file + 8 endpoint methods |
+
+> **Note**: ingest now filters `.aiforge-worktrees/**` paths so prior agent
+> worktree dirs no longer pollute the index. Existing graphs can be
+> cleaned with the snippet in the troubleshooting section below.
 
 ---
 
@@ -199,9 +226,38 @@ Runs as post-ingest pass; no graph rebuild needed.
 | Neo4j 5 (Community) | `bolt://127.0.0.1:7687` | Graph |
 | LM Studio / Ollama | `http://127.0.0.1:1234/v1` | Stages 2/3/6 + translator |
 | bge-m3 sidecar | `http://127.0.0.1:8764` | Stage 7 + query embedding |
+| Cross-encoder reranker | `http://127.0.0.1:8765` | Translator step 5 (optional) |
 | RepoMix CLI | `npm i -g repomix` | Stage 1 |
 
 Run `make doctor` to verify.
+
+---
+
+## Troubleshooting
+
+**Worktree pollution** — agent runtimes (e.g. AIForgeCrew) create
+`.aiforge-worktrees/<ticket>/...` dirs. These resemble source files and
+get indexed unless filtered. Symptom: query top-K dominated by
+`.aiforge-worktrees/...` paths. Fix:
+
+```cypher
+MATCH (f:File_v2)-[:CHUNKED_AS]->(c:Chunk_v2)
+WHERE f.path STARTS WITH ".aiforge-worktrees/"
+DETACH DELETE c;
+MATCH (f:File_v2)-[:DEFINES]->(s:Symbol_v2)
+WHERE f.path STARTS WITH ".aiforge-worktrees/"
+DETACH DELETE s;
+MATCH (f:File_v2) WHERE f.path STARTS WITH ".aiforge-worktrees/"
+DETACH DELETE f;
+```
+
+**Translator returns nothing** — check the translator LLM URL/model
+(`AIFORGE_INTENT_LM_URL`, `AIFORGE_CODEMEM_LM_MODEL`); they default to
+`:1235` which is *not* the same as the agent LLM `:1234`.
+
+**Rerank slow / wrong** — disable with `AIFORGE_TRANSLATOR_RERANK=0`
+(falls back to RRF order). Or change top-N via
+`AIFORGE_TRANSLATOR_RERANK_TOPN`.
 
 ---
 
