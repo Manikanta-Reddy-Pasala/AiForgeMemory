@@ -58,7 +58,9 @@ def translate(
     if not text.strip():
         return g
 
-    # T1 — embed + Cypher vector top-K
+    # T1 — embed + Cypher vector top-K + fulltext on Symbol signatures.
+    # Fulltext branch is the recall safety-net: catches explicit-keyword
+    # queries ("save sales") even when L5 vector coverage is partial.
     candidate_files: list[str] = []
     candidate_symbols: list[str] = []
     try:
@@ -72,6 +74,19 @@ def translate(
         g.used_top_k = len(rows)
     except Exception as exc:
         g.errors.append(f"embed/topk: {exc}")
+
+    # Fulltext recall — Symbol_v2 fqname/signature/doc fulltext index.
+    # Adds Symbol candidates whose signature/fqname mention any query token.
+    try:
+        ft_syms, ft_files = _fulltext_symbols(driver, repo=repo, text=text, k=top_k)
+        for fq in ft_syms:
+            if fq not in candidate_symbols:
+                candidate_symbols.append(fq)
+        for fp in ft_files:
+            if fp not in candidate_files:
+                candidate_files.append(fp)
+    except Exception as exc:
+        g.errors.append(f"fulltext: {exc}")
 
     # Service catalog
     services = _services_for(driver, repo=repo)
@@ -138,6 +153,39 @@ def _symbols_in(driver, *, repo: str, files: list[str]) -> list[str]:
     with driver.session() as sess:
         rows = list(sess.run(cy, repo=repo, files=files))
     return [r["fq"] for r in rows]
+
+
+_FULLTEXT_CYPHER = """
+CALL db.index.fulltext.queryNodes('codemem_symbol_signature_ft', $q)
+YIELD node AS sym, score
+WHERE sym.repo = $repo
+RETURN sym.fqname AS fqname, sym.file_path AS file_path, score
+ORDER BY score DESC
+LIMIT $k
+"""
+
+
+def _fulltext_symbols(
+    driver, *, repo: str, text: str, k: int = 20,
+) -> tuple[list[str], list[str]]:
+    """Lucene fulltext search over Symbol fqname/signature/doc.
+    Returns (symbol_fqnames, file_paths).
+    """
+    # Lucene query: split into terms, OR them, drop very short tokens
+    tokens = [t for t in text.replace("/", " ").replace(".", " ").split()
+              if len(t) >= 3]
+    if not tokens:
+        return [], []
+    q = " OR ".join(tokens)
+    syms: list[str] = []
+    files: list[str] = []
+    with driver.session() as s:
+        for r in s.run(_FULLTEXT_CYPHER, repo=repo, q=q, k=k):
+            syms.append(r["fqname"])
+            fp = r.get("file_path")
+            if fp and fp not in files:
+                files.append(fp)
+    return syms, files
 
 
 def _services_for(driver, *, repo: str) -> list[str]:
