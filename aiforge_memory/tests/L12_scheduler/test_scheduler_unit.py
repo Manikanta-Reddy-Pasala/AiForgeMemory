@@ -140,3 +140,74 @@ def test_fetch_failure_returns_clean_outcome(tmp_path, monkeypatch):
     )
     out = scheduler.fetch_and_maybe_pull(tmp_path)
     assert out.fetched is False and out.pulled is False
+
+
+# ─── Dynamic timeout (per_file_seconds scaling) ───────────────────────
+
+def test_count_ingest_files_walks_extensions(tmp_path):
+    (tmp_path / "a.py").write_text("x")
+    (tmp_path / "b.js").write_text("x")
+    (tmp_path / "c.bin").write_text("x")
+    (tmp_path / "d.lock").write_text("x")
+    nm = tmp_path / "node_modules"; nm.mkdir()
+    (nm / "vendor.js").write_text("x")
+    n = scheduler._count_ingest_files(str(tmp_path))
+    assert n == 2  # a.py + b.js; vendored + binary excluded
+
+
+def test_count_ingest_files_handles_empty():
+    assert scheduler._count_ingest_files("") == 0
+    assert scheduler._count_ingest_files("/no/such/path") == 0
+
+
+def test_effective_timeout_disabled_returns_floor(tmp_path):
+    rs = scheduler.RepoSchedule(name="r", path=str(tmp_path),
+                                timeout_seconds=900,
+                                per_file_seconds=0.0)
+    t, n = scheduler._effective_timeout(rs, str(tmp_path))
+    assert t == 900
+    assert n == 0  # not counted when disabled
+
+
+def test_effective_timeout_scales_with_files(tmp_path):
+    for i in range(50):
+        (tmp_path / f"f{i}.py").write_text("x")
+    rs = scheduler.RepoSchedule(name="r", path=str(tmp_path),
+                                timeout_seconds=300,
+                                per_file_seconds=2.0)
+    t, n = scheduler._effective_timeout(rs, str(tmp_path))
+    assert n == 50
+    assert t == 300  # 50 × 2 = 100s, floor 300 wins
+
+
+def test_effective_timeout_scales_above_floor(tmp_path):
+    for i in range(500):
+        (tmp_path / f"f{i}.py").write_text("x")
+    rs = scheduler.RepoSchedule(name="r", path=str(tmp_path),
+                                timeout_seconds=300,
+                                per_file_seconds=3.0)
+    t, n = scheduler._effective_timeout(rs, str(tmp_path))
+    assert n == 500
+    assert t == 1500  # 500 × 3 = 1500, exceeds floor
+
+
+def test_effective_timeout_capped_by_env(tmp_path, monkeypatch):
+    for i in range(2000):
+        (tmp_path / f"f{i}.py").write_text("x")
+    monkeypatch.setenv("AIFORGE_SCHEDULER_MAX_TIMEOUT_S", "1000")
+    rs = scheduler.RepoSchedule(name="r", path=str(tmp_path),
+                                timeout_seconds=300,
+                                per_file_seconds=10.0)
+    t, _ = scheduler._effective_timeout(rs, str(tmp_path))
+    assert t == 1000  # 2000 × 10 = 20000, capped at 1000
+
+
+def test_config_round_trip_includes_per_file(tmp_path):
+    cfg_path = tmp_path / "scheduler.yaml"
+    rs = scheduler.RepoSchedule(name="r1", path="/tmp/r1",
+                                timeout_seconds=300,
+                                per_file_seconds=1.5)
+    cfg = scheduler.SchedulerConfig(repos=[rs])
+    cfg.save(cfg_path)
+    loaded = scheduler.SchedulerConfig.load(cfg_path)
+    assert loaded.repos[0].per_file_seconds == 1.5

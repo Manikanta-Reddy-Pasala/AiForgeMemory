@@ -80,8 +80,15 @@ class RepoSchedule:
     skip_summaries: bool = False
     skip_chunks: bool = False
     use_lsp: bool = False          # opt-in LSP-confirmed CALLS
-    timeout_seconds: int = 1800    # per-tick wall ceiling (prevents one
-                                   # 70-min ingest blocking the loop)
+    timeout_seconds: int = 1800    # FLOOR for the per-tick wall ceiling.
+                                   # Effective timeout grows with file
+                                   # count when per_file_seconds > 0.
+    per_file_seconds: float = 0.0  # 0 = fixed timeout. >0 enables
+                                   # dynamic scaling: timeout =
+                                   # max(timeout_seconds,
+                                   #     file_count × per_file_seconds),
+                                   # capped by AIFORGE_SCHEDULER_MAX_TIMEOUT_S
+                                   # (default 14400s / 4 hr).
 
 
 @dataclass
@@ -110,6 +117,7 @@ class SchedulerConfig:
                     skip_chunks=bool(r.get("skip_chunks", False)),
                     use_lsp=bool(r.get("use_lsp", False)),
                     timeout_seconds=int(r.get("timeout_seconds", 1800)),
+                    per_file_seconds=float(r.get("per_file_seconds", 0.0)),
                 ))
             except (KeyError, ValueError):
                 continue
@@ -280,6 +288,69 @@ def _write_status(d: dict[str, RepoStatus]) -> None:
 
 # ─── Tick ──────────────────────────────────────────────────────────────
 
+# File extensions that actually trigger LLM/embed work — skip vendored
+# bundles, lockfiles, and binary artifacts so the scaling estimate
+# matches reality. Mirrors the ingest walker's allowlist (kept loose;
+# under-counting is safer than over-counting because the floor catches
+# small repos anyway).
+_INGEST_EXT = (
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".java", ".kt", ".kts", ".scala",
+    ".go", ".rs", ".rb", ".php", ".swift",
+    ".c", ".h", ".cc", ".cpp", ".hpp",
+    ".cs", ".m", ".mm",
+    ".md", ".rst", ".adoc", ".txt",
+    ".yml", ".yaml", ".json", ".toml",
+)
+
+
+def _count_ingest_files(repo_path: str) -> int:
+    """Fast best-effort file count under repo_path with ingest-relevant
+    extensions. Skips ``.git``, ``node_modules``, ``.venv``, ``target``,
+    ``build``, ``dist`` so vendored trees don't inflate the estimate.
+
+    Used for dynamic timeout scaling — exactness doesn't matter, ±20%
+    is fine because the floor (rs.timeout_seconds) catches under-counts."""
+    import os as _os
+    if not repo_path:
+        return 0
+    skip_dirs = {
+        ".git", "node_modules", ".venv", "venv", "target", "build",
+        "dist", ".idea", ".vscode", ".aiforge", ".aiforge-worktrees",
+        "graphify-out", "__pycache__", "coverage",
+    }
+    total = 0
+    for root, dirs, files in _os.walk(repo_path):
+        # In-place prune so os.walk doesn't descend into vendored trees.
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for f in files:
+            if f.endswith(_INGEST_EXT):
+                total += 1
+    return total
+
+
+def _effective_timeout(rs: RepoSchedule, repo_path: str) -> tuple[int, int]:
+    """Resolve the wall-clock timeout for one tick, returning
+    ``(timeout_s, file_count)``.
+
+    Behaviour:
+      - If ``rs.per_file_seconds <= 0`` → ``rs.timeout_seconds`` (legacy).
+      - Else → ``max(rs.timeout_seconds, file_count × per_file_seconds)``,
+        capped by ``AIFORGE_SCHEDULER_MAX_TIMEOUT_S`` (default 14400s).
+    """
+    import os as _os
+    if rs.per_file_seconds <= 0:
+        return rs.timeout_seconds, 0
+    file_count = _count_ingest_files(repo_path)
+    scaled = int(file_count * rs.per_file_seconds)
+    try:
+        cap = int(_os.environ.get("AIFORGE_SCHEDULER_MAX_TIMEOUT_S",
+                                  "14400"))
+    except ValueError:
+        cap = 14400
+    return min(cap, max(rs.timeout_seconds, scaled)), file_count
+
+
 def tick_repo(
     rs: RepoSchedule, *, driver, state_conn, log,
 ) -> RepoStatus:
@@ -333,15 +404,18 @@ def tick_repo(
         except Exception as exc:  # noqa: BLE001 — must surface to outer
             result_box["exc"] = exc
 
+    eff_timeout, file_count = _effective_timeout(rs, rs.path)
     try:
         worker = threading.Thread(target=_work, name=f"tick-{rs.name}",
                                   daemon=True)
         worker.start()
-        worker.join(timeout=rs.timeout_seconds)
+        worker.join(timeout=eff_timeout)
         if worker.is_alive():
             status.last_status = "timeout"
-            status.last_error = f"tick exceeded {rs.timeout_seconds}s"
-            log(f"[{rs.name}] timeout after {rs.timeout_seconds}s — "
+            scale = (f", scaled from files={file_count} × {rs.per_file_seconds}s/file"
+                     if rs.per_file_seconds > 0 else "")
+            status.last_error = f"tick exceeded {eff_timeout}s{scale}"
+            log(f"[{rs.name}] timeout after {eff_timeout}s{scale} — "
                 "thread leaked (will be cleaned up by GC)")
             # Worker thread keeps running but daemon=True so it dies on
             # process exit. Lock release below frees subsequent ticks.
