@@ -25,6 +25,10 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.4",
 ]
+ui = [
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+]
 
 [project.scripts]
 aiforge-memory = "aiforge_memory.api.cli:main"
@@ -34,6 +38,8 @@ include = ["aiforge_memory*"]
 
 [tool.setuptools.package-data]
 "aiforge_memory.ingest" = ["prompts/*.txt", "queries/*.scm"]
+"aiforge_memory.ui" = ["index.html"]
+"aiforge_memory.eval" = ["*.yaml"]
 
 [tool.ruff]
 line-length = 100

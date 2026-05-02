@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AiForgeMemory</title>
+  <style>
+    :root {
+      --bg: #0e1116; --fg: #d8dee9; --muted: #6e7889; --accent: #88c0d0;
+      --good: #a3be8c; --bad: #bf616a; --warn: #ebcb8b;
+      --card: #161b22; --border: #30363d; --hover: #1f242c;
+      --code-bg: #0a0d12;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Monaco, monospace; background: var(--bg); color: var(--fg); font-size: 13px; }
+    body { display: grid; grid-template-rows: auto 1fr; }
+    header { padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--card); display: flex; align-items: center; gap: 16px; }
+    header h1 { margin: 0; font-size: 14px; font-weight: 600; color: var(--accent); }
+    header .health { display: flex; gap: 8px; font-size: 11px; }
+    header .health .pill { padding: 2px 8px; border-radius: 10px; background: #2a2f3a; }
+    header .health .ok { background: #2a4a32; color: var(--good); }
+    header .health .bad { background: #4a2a32; color: var(--bad); }
+    main { display: grid; grid-template-columns: 280px 1fr; overflow: hidden; }
+    aside { border-right: 1px solid var(--border); overflow-y: auto; padding: 12px; background: var(--card); }
+    .pane { padding: 16px; overflow-y: auto; }
+    h2 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: 1px; }
+    .repo-row { padding: 6px 8px; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+    .repo-row:hover { background: var(--hover); }
+    .repo-row.active { background: var(--hover); color: var(--accent); }
+    .repo-row .name { font-weight: 600; }
+    .repo-row .meta { font-size: 10px; color: var(--muted); }
+    .search-row { display: flex; gap: 8px; margin-bottom: 16px; }
+    .search-row input[type=text] { flex: 1; padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--code-bg); color: var(--fg); font-family: inherit; font-size: 13px; }
+    .search-row select, .search-row button { padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--code-bg); color: var(--fg); font-family: inherit; font-size: 13px; cursor: pointer; }
+    .search-row button { background: var(--accent); color: #000; font-weight: 600; }
+    .search-row button:disabled { opacity: 0.5; cursor: wait; }
+    .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+    .tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; }
+    .tab.active { border-bottom-color: var(--accent); color: var(--accent); }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-bottom: 8px; }
+    .card .path { color: var(--accent); font-weight: 600; }
+    .card .summary { color: var(--muted); margin-top: 4px; font-size: 12px; }
+    .meta-grid { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; font-size: 12px; }
+    .meta-grid .k { color: var(--muted); }
+    pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 12px; overflow-x: auto; font-size: 12px; line-height: 1.5; }
+    .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; background: #2a2f3a; font-size: 10px; margin-right: 4px; }
+    .badge.method { background: #2a3f4a; color: var(--accent); }
+    .badge.class { background: #3a2a4a; color: #c5a3d8; }
+    .badge.field { background: #4a3a2a; color: var(--warn); }
+    .badge.interface { background: #2a4a3a; color: var(--good); }
+    .err { color: var(--bad); font-size: 11px; }
+    .empty { color: var(--muted); padding: 24px; text-align: center; }
+    .latency { color: var(--muted); font-size: 11px; margin-left: 8px; }
+    a { color: var(--accent); text-decoration: none; cursor: pointer; }
+    a:hover { text-decoration: underline; }
+    .file-link { font-family: inherit; font-size: 12px; word-break: break-all; }
+    .scheduler-row { padding: 4px 0; font-size: 11px; border-bottom: 1px dotted var(--border); display: flex; gap: 8px; }
+    .status-ok { color: var(--good); }
+    .status-bad { color: var(--bad); }
+    .status-meh { color: var(--warn); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>aiforge-memory</h1>
+    <div class="health" id="health"></div>
+    <div style="margin-left:auto; font-size:11px; color:var(--muted)" id="schedstate"></div>
+  </header>
+  <main>
+    <aside>
+      <h2>Repos</h2>
+      <div id="repos"></div>
+    </aside>
+    <div class="pane">
+      <div class="search-row">
+        <input type="text" id="q" placeholder="Natural language query (e.g. 'how does retry work for failed sync messages')" />
+        <select id="repoSel"></select>
+        <button id="searchBtn">Search</button>
+      </div>
+      <div class="tabs">
+        <div class="tab active" data-view="search">Search</div>
+        <div class="tab" data-view="repo">Repo</div>
+        <div class="tab" data-view="memory">Memory</div>
+        <div class="tab" data-view="links">Links</div>
+        <div class="tab" data-view="scheduler">Scheduler</div>
+      </div>
+      <div id="view"></div>
+    </div>
+  </main>
+
+<script>
+const $ = (s, ctx=document) => ctx.querySelector(s);
+const $$ = (s, ctx=document) => Array.from(ctx.querySelectorAll(s));
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let repos = [];
+let activeRepo = null;
+let activeView = 'search';
+
+async function api(path, opts={}) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(`${path}: ${r.status}`);
+  return r.json();
+}
+
+async function loadRepos() {
+  repos = await api('/api/repos');
+  const sel = $('#repoSel');
+  sel.innerHTML = repos.map(r => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join('');
+  $('#repos').innerHTML = repos.map(r => `
+    <div class="repo-row" data-name="${esc(r.name)}">
+      <div>
+        <div class="name">${esc(r.name)}</div>
+        <div class="meta">${r.lang||'?'} · ${r.files} files · ${r.symbols} sym · ${r.chunks} chunks</div>
+      </div>
+    </div>`).join('');
+  $$('.repo-row').forEach(el => el.addEventListener('click', () => {
+    activeRepo = el.dataset.name;
+    sel.value = activeRepo;
+    $$('.repo-row').forEach(x => x.classList.remove('active'));
+    el.classList.add('active');
+    setView('repo');
+  }));
+  if (!activeRepo && repos.length) {
+    activeRepo = repos[0].name;
+    sel.value = activeRepo;
+  }
+}
+
+async function loadHealth() {
+  try {
+    const h = await api('/api/health');
+    $('#health').innerHTML = h.checks.map(c =>
+      `<span class="pill ${c.ok ? 'ok' : 'bad'}">${esc(c.name)}</span>`
+    ).join('');
+  } catch (e) {
+    $('#health').innerHTML = `<span class="pill bad">UI ↔ Neo4j down</span>`;
+  }
+}
+
+async function loadSched() {
+  try {
+    const s = await api('/api/scheduler');
+    const pid = s.running ? `daemon pid ${s.pid}` : 'daemon STOPPED';
+    const cls = s.running ? 'status-ok' : 'status-bad';
+    $('#schedstate').innerHTML = `<span class="${cls}">${pid}</span>`;
+  } catch (e) {
+    $('#schedstate').innerHTML = `<span class="status-bad">scheduler unreachable</span>`;
+  }
+}
+
+// ── Views ─────────────────────────────────────────────────────────
+
+function setView(v) {
+  activeView = v;
+  $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === v));
+  if (v === 'search') renderSearchEmpty();
+  else if (v === 'repo') loadRepoView();
+  else if (v === 'memory') loadMemoryView();
+  else if (v === 'links') loadLinksView();
+  else if (v === 'scheduler') loadSchedulerView();
+}
+
+function renderSearchEmpty() {
+  $('#view').innerHTML = `<div class="empty">Type a question and press Search.</div>`;
+}
+
+async function search() {
+  const q = $('#q').value.trim();
+  const repo = $('#repoSel').value;
+  if (!q) return;
+  const btn = $('#searchBtn');
+  btn.disabled = true; btn.textContent = '…';
+  setView('search');
+  $('#view').innerHTML = `<div class="empty">searching ${esc(repo)} · this can take 10–25s with live LLM grounding</div>`;
+  const t0 = performance.now();
+  try {
+    const r = await api('/api/search', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({query: q, repo}),
+    });
+    const ms = Math.round(performance.now() - t0);
+    renderSearchResults(r, ms);
+  } catch (e) {
+    $('#view').innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Search';
+  }
+}
+
+function renderSearchResults(r, ms) {
+  const b = r.bundle;
+  const sec = (title, body) => body ? `<div class="card"><h2>${title}</h2>${body}</div>` : '';
+  let out = `<div style="margin-bottom:8px"><strong>${esc(r.query)}</strong> <span class="latency">${ms}ms · intent: ${esc(b.intent || '?')}</span></div>`;
+  out += sec('Anchor files', (b.files || []).map(f => `
+    <div style="margin-bottom:6px">
+      <a class="file-link" onclick="openFile('${esc(r.repo)}','${esc(f.path)}')">${esc(f.path)}</a>
+      ${f.summary ? `<div class="summary">${esc(f.summary).slice(0, 280)}</div>` : ''}
+    </div>`).join(''));
+  out += sec('Symbols', (b.symbols || []).map(s => `
+    <div><span class="badge ${s.kind || ''}">${esc(s.kind||'sym')}</span><code>${esc(s.fqname)}</code> <span class="summary">${esc(s.signature || '')}</span></div>
+  `).join(''));
+  out += sec('Decisions', (b.decisions || []).map(d => `
+    <div><strong>${esc(d.title)}</strong> <span class="badge">${esc(d.status)}</span>
+      <div class="summary">${esc(d.rationale || '')}</div></div>
+  `).join(''));
+  out += sec('Observations', (b.observations || []).map(o => `
+    <div><span class="badge">${esc(o.kind)}</span> ${esc(o.text)}</div>
+  `).join(''));
+  out += sec('Cross-repo edges', (b.cross_repo || []).map(e => `
+    <div><code>${esc(e.src)}</code> → <code>${esc(e.dst)}</code> via ${esc(e.via)} <span class="latency">conf ${(e.confidence||0).toFixed(2)}</span></div>
+  `).join(''));
+  if (b.runbook_md) out += sec('Runbook', `<pre>${esc(b.runbook_md.slice(0, 2000))}</pre>`);
+  out += `<div class="latency" style="margin-top:12px">sources: ${(b.sources_used||[]).join(', ')}${b.errors?.length ? ' · errors: ' + esc(b.errors.join('; ')) : ''}</div>`;
+  $('#view').innerHTML = out;
+}
+
+async function loadRepoView() {
+  if (!activeRepo) { $('#view').innerHTML = `<div class="empty">Click a repo on the left.</div>`; return; }
+  $('#view').innerHTML = `<div class="empty">loading ${esc(activeRepo)}…</div>`;
+  try {
+    const r = await api(`/api/repo/${encodeURIComponent(activeRepo)}`);
+    let out = `<h2>${esc(activeRepo)}</h2>`;
+    out += `<div class="card"><div class="meta-grid">
+      <div class="k">path</div><div>${esc(r.meta.path || '')}</div>
+      <div class="k">lang</div><div>${esc(r.meta.lang_primary || '?')}</div>
+      <div class="k">branch</div><div>${esc(r.meta.branch || '?')} @ <code>${esc((r.meta.head_sha||'').slice(0,8))}</code></div>
+      <div class="k">remote</div><div>${esc(r.meta.remote_url || '')}</div>
+      <div class="k">last indexed</div><div>${esc(r.meta.last_indexed_at || '')}</div>
+      <div class="k">build / test / run</div><div><code>${esc(r.meta.build_cmd || '')}</code> · <code>${esc(r.meta.test_cmd || '')}</code> · <code>${esc(r.meta.run_cmd || '')}</code></div>
+    </div></div>`;
+    if (r.services?.length) {
+      out += `<h2>Services (${r.services.length})</h2>` + r.services.map(s => `
+        <div class="card"><div class="path">${esc(s.name)}</div>
+          <div class="summary">${esc(s.description || '')} · role: ${esc(s.role || '')}</div></div>
+      `).join('');
+    }
+    out += `<h2>Files (${r.files.length})</h2>` + r.files.slice(0, 100).map(f => `
+      <div class="card">
+        <a class="file-link" onclick="openFile('${esc(activeRepo)}','${esc(f.path)}')">${esc(f.path)}</a>
+        <span class="latency">${f.lines||'?'}L · ${f.lang||'?'}</span>
+        ${f.summary ? `<div class="summary">${esc(f.summary).slice(0, 220)}</div>` : ''}
+      </div>`).join('');
+    $('#view').innerHTML = out;
+  } catch (e) {
+    $('#view').innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+async function openFile(repo, path) {
+  $('#view').innerHTML = `<div class="empty">loading ${esc(path)}…</div>`;
+  try {
+    const r = await api(`/api/file?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(path)}`);
+    let out = `<h2>${esc(path)}</h2>`;
+    out += `<div class="card"><div class="meta-grid">
+      <div class="k">repo</div><div>${esc(repo)}</div>
+      <div class="k">lang</div><div>${esc(r.meta.lang || '?')}</div>
+      <div class="k">lines</div><div>${esc(r.meta.lines || '?')}</div>
+      <div class="k">summary</div><div>${esc(r.meta.summary || '(none)')}</div>
+    </div></div>`;
+    if (r.symbols?.length) {
+      out += `<h2>Symbols (${r.symbols.length})</h2>` + r.symbols.map(s => `
+        <div class="card">
+          <span class="badge ${s.kind}">${esc(s.kind)}</span>
+          <code>${esc(s.fqname.split('::').pop())}</code>
+          <span class="latency">L${s.line_start}–${s.line_end} · ${esc(s.visibility || '')} ${esc(s.return_type || '')}</span>
+          <div class="summary"><code>${esc(s.signature || '')}</code></div>
+        </div>`).join('');
+    }
+    if (r.chunks?.length) {
+      out += `<h2>Chunks (${r.chunks.length})</h2>` + r.chunks.map(c => `
+        <div class="card">
+          <span class="latency">L${c.line_start}–${c.line_end} · ${c.tokens} tok</span>
+          <pre>${esc(c.preview)}…</pre>
+        </div>`).join('');
+    }
+    $('#view').innerHTML = out;
+  } catch (e) {
+    $('#view').innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+async function loadMemoryView() {
+  if (!activeRepo) { $('#view').innerHTML = `<div class="empty">Pick a repo first.</div>`; return; }
+  $('#view').innerHTML = `<div class="empty">loading memory for ${esc(activeRepo)}…</div>`;
+  try {
+    const rows = await api(`/api/memory?repo=${encodeURIComponent(activeRepo)}&limit=200`);
+    if (!rows.length) { $('#view').innerHTML = `<div class="empty">No memory nodes for ${esc(activeRepo)}.</div>`; return; }
+    $('#view').innerHTML = `<h2>Memory (${rows.length})</h2>` + rows.map(r => `
+      <div class="card">
+        <span class="badge">${esc(r.label)}</span>
+        ${r.kind ? `<span class="badge">${esc(r.kind)}</span>` : ''}
+        <strong>${esc(r.title || '(no title)')}</strong>
+        <span class="latency">${esc(r.created_at || '')}</span>
+        <div class="summary">${esc((r.text || '').slice(0, 400))}</div>
+        <code class="latency">${esc(r.id)}</code>
+      </div>`).join('');
+  } catch (e) {
+    $('#view').innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+async function loadLinksView() {
+  $('#view').innerHTML = `<div class="empty">loading…</div>`;
+  try {
+    const params = activeRepo ? `?repo=${encodeURIComponent(activeRepo)}` : '';
+    const rows = await api(`/api/links${params}`);
+    if (!rows.length) { $('#view').innerHTML = `<div class="empty">No CALLS_REPO edges${activeRepo ? ' for ' + esc(activeRepo) : ''}.</div>`; return; }
+    $('#view').innerHTML = `<h2>Cross-repo edges</h2>` + rows.map(e => `
+      <div class="card">
+        <code>${esc(e.src)}</code> → <code>${esc(e.dst)}</code>
+        <span class="badge">${esc(e.via)}</span>
+        <span class="latency">conf ${(e.confidence||0).toFixed(2)}</span>
+        <div class="summary">evidence: ${(e.evidence||[]).slice(0,8).map(esc).join(', ')}${(e.evidence||[]).length > 8 ? '…' : ''}</div>
+      </div>`).join('');
+  } catch (e) {
+    $('#view').innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+async function loadSchedulerView() {
+  try {
+    const s = await api('/api/scheduler');
+    let out = `<h2>Daemon</h2>`;
+    out += `<div class="card"><div class="meta-grid">
+      <div class="k">running</div><div class="${s.running ? 'status-ok' : 'status-bad'}">${s.running ? 'YES' : 'NO'}</div>
+      <div class="k">pid</div><div>${esc(s.pid || '(none)')}</div>
+      <div class="k">pid file</div><div><code>${esc(s.pid_file || '')}</code></div>
+    </div></div>`;
+    const repoEntries = Object.values(s.repos || {});
+    repoEntries.sort((a, b) => (b.last_run || 0) - (a.last_run || 0));
+    out += `<h2>Recent ticks (${repoEntries.length})</h2>`;
+    out += repoEntries.map(r => {
+      const cls = (r.last_status || '').includes('error') || r.last_status === 'neo4j_down' ? 'status-bad'
+                : r.last_status === 'timeout' ? 'status-meh'
+                : r.last_status === 'skipped_unchanged' || r.last_status === 'no_changes' ? 'status-ok'
+                : 'status-ok';
+      const when = r.last_run ? new Date(r.last_run * 1000).toLocaleString() : '(never)';
+      return `<div class="scheduler-row">
+        <span style="width:200px">${esc(r.name)}</span>
+        <span class="${cls}" style="width:120px">${esc(r.last_status || '?')}</span>
+        <span style="width:180px">${esc(when)}</span>
+        <span class="latency">behind ${r.last_behind || 0} · pulled ${r.last_pulled ? '✓' : '✗'}</span>
+        ${r.last_error ? `<span class="err">${esc(r.last_error.slice(0,80))}</span>` : ''}
+      </div>`;
+    }).join('');
+    $('#view').innerHTML = out;
+  } catch (e) {
+    $('#view').innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────
+
+$('#searchBtn').addEventListener('click', search);
+$('#q').addEventListener('keydown', e => { if (e.key === 'Enter') search(); });
+$$('.tab').forEach(t => t.addEventListener('click', () => setView(t.dataset.view)));
+$('#repoSel').addEventListener('change', e => activeRepo = e.target.value);
+
+async function init() {
+  await loadRepos();
+  await loadHealth();
+  await loadSched();
+  setView('search');
+  setInterval(loadHealth, 30000);
+  setInterval(loadSched, 30000);
+}
+init();
+</script>
+</body>
+</html>

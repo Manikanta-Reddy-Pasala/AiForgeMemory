@@ -472,6 +472,21 @@ def _cmd_ops_rotate_logs(_args: argparse.Namespace) -> int:
     return 0
 
 
+# ─── UI ───────────────────────────────────────────────────────────────
+
+def _cmd_ui(args: argparse.Namespace) -> int:
+    try:
+        from aiforge_memory.ui.server import serve
+    except ImportError:
+        print(json.dumps({"error": "ui extra not installed; "
+                                   "run: uv pip install '.[ui]'"}))
+        return 2
+    print(json.dumps({"serving": f"http://{args.host}:{args.port}",
+                      "docs": f"http://{args.host}:{args.port}/docs"}))
+    serve(host=args.host, port=args.port)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="aiforge-memory")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -646,6 +661,16 @@ def main(argv: list[str] | None = None) -> int:
     ops_r = ops_sub.add_parser("rotate-logs",
                                help="Rotate AiForge logs over 10MB")
     ops_r.set_defaults(func=_cmd_ops_rotate_logs)
+
+    # ─── UI ───────────────────────────────────────────────────────────
+    ui = sub.add_parser(
+        "ui",
+        help="Serve the read-only web UI (search, repos, scheduler, memory)",
+    )
+    ui.add_argument("--host", default="127.0.0.1",
+                    help="bind address (default 127.0.0.1; use 0.0.0.0 for LAN)")
+    ui.add_argument("--port", type=int, default=8767)
+    ui.set_defaults(func=_cmd_ui)
 
     args = p.parse_args(argv)
     return args.func(args)

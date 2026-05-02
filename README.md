@@ -148,6 +148,41 @@ aiforge-memory doctor              # repomix + neo4j + llm
 aiforge-memory health [--table]    # all sidecars + latency → ~/.aiforge/health.json
 aiforge-memory ops backup [--keep 14]   # sqlite VACUUM INTO snapshot
 aiforge-memory ops rotate-logs          # roll logs >10MB, keep 5 generations
+
+# UI (read-only, no auth)
+aiforge-memory ui [--host 127.0.0.1] [--port 8767]
+```
+
+---
+
+## Web UI
+
+Single-page read-only dashboard. No auth (bind localhost or trusted LAN). Install: `uv pip install '.[ui]'`.
+
+```bash
+aiforge-memory ui --host 0.0.0.0 --port 8767
+```
+
+Browser tabs:
+- **Search** — NL query against any repo, hydrated ContextBundle (anchor files, summaries, symbols, decisions, observations, cross-repo edges, runbook)
+- **Repo** — file list + summaries + services for a repo; click any file → symbols + chunks
+- **Memory** — Decision/Observation/Note/Doc nodes per repo
+- **Links** — `CALLS_REPO` edges with evidence
+- **Scheduler** — daemon pid + per-repo last_run / status / errors
+
+Endpoints (curl-friendly):
+
+```
+GET  /                       HTML dashboard
+GET  /api/repos              repo list + counts
+GET  /api/repo/{name}        meta + services + file list (200 newest)
+GET  /api/file?repo=&path=   file meta + symbols + chunks
+GET  /api/health             sidecar health snapshot
+GET  /api/scheduler          daemon status + per-repo journal
+GET  /api/memory?repo=&type= memory nodes
+GET  /api/links[?repo=]      CALLS_REPO edges
+POST /api/search             {query, repo} → ContextBundle
+GET  /docs                   OpenAPI / Swagger UI
 ```
 
 ---
