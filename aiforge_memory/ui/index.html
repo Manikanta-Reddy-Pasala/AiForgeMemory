@@ -438,6 +438,7 @@ async function openFile(repo, path) {
           <span class="badge ${s.kind}">${esc(s.kind)}</span>
           <code>${esc(s.fqname.split('::').pop())}</code>
           <span class="latency">L${s.line_start}–${s.line_end} · ${esc(s.visibility || '')} ${esc(s.return_type || '')}</span>
+          ${s.summary ? `<div class="summary" style="margin-top:6px">💡 ${esc(s.summary)}</div>` : ''}
           <div class="summary"><code>${esc(s.signature || '')}</code></div>
         </div>`).join('');
     }

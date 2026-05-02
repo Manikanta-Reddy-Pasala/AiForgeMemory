@@ -152,6 +152,7 @@ def build_app():
                            s.signature AS signature,
                            coalesce(s.visibility,'') AS visibility,
                            coalesce(s.return_type,'') AS return_type,
+                           coalesce(s.summary,'') AS summary,
                            s.line_start AS line_start, s.line_end AS line_end
                     ORDER BY s.line_start
                 """, r=repo, p=path)]

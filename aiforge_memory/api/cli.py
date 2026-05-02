@@ -131,6 +131,66 @@ def _cmd_services(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_summarise_symbols(args: argparse.Namespace) -> int:
+    """Walk the repo's symbols, LLM-summarise non-trivial ones, write
+    onto Symbol_v2.summary. No re-walk — uses on-disk source via
+    treesitter_walk so this is safe to run after ingest."""
+    from aiforge_memory.ingest import scheduler as sched
+    from aiforge_memory.ingest import symbol_summary
+    from aiforge_memory.ingest import treesitter_walk
+    from aiforge_memory.store import symbol_summary_writer
+
+    path = args.path
+    if not path:
+        for r in sched.SchedulerConfig.load().repos:
+            if r.name == args.repo:
+                path = r.path
+                break
+    if not path:
+        drv = _driver()
+        try:
+            with drv.session() as s:
+                rec = s.run(
+                    "MATCH (r:Repo {name:$n}) "
+                    "RETURN coalesce(r.path, r.local_path, '') AS p",
+                    n=args.repo,
+                ).single()
+                if rec and rec["p"]:
+                    path = rec["p"]
+        finally:
+            drv.close()
+    if not path:
+        print(json.dumps({
+            "error": "no path",
+            "hint": "pass --path or register the repo in the scheduler",
+        }))
+        return 1
+
+    walked = treesitter_walk.walk_repo(args.repo, path)
+    print(json.dumps({
+        "stage": "walk", "files": len(walked),
+        "symbols": sum(len(w.symbols or []) for w in walked),
+    }), flush=True)
+
+    summaries = symbol_summary.summarise_symbols(
+        walked, repo=args.repo, repo_root=path,
+        limit=args.limit, min_lines=args.min_lines,
+    )
+    drv = _driver()
+    try:
+        counts = symbol_summary_writer.write_symbol_summaries(
+            drv, repo=args.repo, summaries=summaries,
+        )
+    finally:
+        drv.close()
+    print(json.dumps({
+        "stage": "done",
+        "candidates": len(summaries),
+        **counts,
+    }, indent=2))
+    return 0
+
+
 def _cmd_stats(args: argparse.Namespace) -> int:
     drv = _driver()
     with drv.session() as s:
@@ -506,6 +566,18 @@ def main(argv: list[str] | None = None) -> int:
     st = sub.add_parser("stats", help="Print Repo node summary")
     st.add_argument("repo")
     st.set_defaults(func=_cmd_stats)
+
+    ss = sub.add_parser(
+        "summarise-symbols",
+        help="LLM-summarise non-trivial methods/functions for a repo",
+    )
+    ss.add_argument("repo")
+    ss.add_argument("--path", help="Repo dir; defaults to scheduler entry")
+    ss.add_argument("--min-lines", type=int, default=8,
+                    help="Skip symbols shorter than this many lines (default 8)")
+    ss.add_argument("--limit", type=int, default=None,
+                    help="Hard cap on LLM calls (largest bodies first)")
+    ss.set_defaults(func=_cmd_summarise_symbols)
 
     sv = sub.add_parser("services", help="List services for a repo")
     sv.add_argument("repo")
