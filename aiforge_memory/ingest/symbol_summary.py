@@ -225,27 +225,49 @@ def _slice_body(content: bytes, line_start: int, line_end: int) -> str:
 
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*\n?|\n?```\s*$", re.MULTILINE)
+# Match the FIRST `{"summary":"..."}` JSON object anywhere in the text —
+# necessary when the model wraps the answer in a thinking dump.
+_SUMMARY_JSON_RE = re.compile(
+    r'\{\s*"summary"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}',
+    re.DOTALL,
+)
 
 
 def _parse(raw: str) -> str | None:
-    """Return the summary string, '' for trivial, or None on error."""
+    """Return the summary string, '' for trivial, or None on error.
+
+    Strategies, in order:
+      1. fence-stripped JSON parse
+      2. balanced-brace fallback (first { to last })
+      3. regex extract — finds {"summary":"..."} embedded inside a
+         thinking-mode preamble
+    """
     cleaned = _FENCE_RE.sub("", raw).strip()
     try:
         obj = json.loads(cleaned)
+        if isinstance(obj, dict):
+            return str(obj.get("summary", "")).strip()
     except json.JSONDecodeError:
-        # Fallback: balanced-brace extract
-        i = cleaned.find("{")
-        j = cleaned.rfind("}")
-        if i < 0 or j <= i:
-            return None
+        pass
+    # Balanced-brace fallback
+    i = cleaned.find("{")
+    j = cleaned.rfind("}")
+    if i >= 0 and j > i:
         try:
             obj = json.loads(cleaned[i : j + 1])
+            if isinstance(obj, dict):
+                return str(obj.get("summary", "")).strip()
         except json.JSONDecodeError:
-            return None
-    if not isinstance(obj, dict):
-        return None
-    s = str(obj.get("summary", "")).strip()
-    return s
+            pass
+    # Regex extract
+    m = _SUMMARY_JSON_RE.search(cleaned)
+    if m:
+        # Unescape JSON string escapes
+        try:
+            return json.loads('"' + m.group(1) + '"')
+        except json.JSONDecodeError:
+            return m.group(1).strip()
+    return None
 
 
 def _call_llm(
@@ -267,7 +289,11 @@ def _call_llm(
     # Compact "system" instructions inline; the file at PROMPT_PATH is
     # the reference but here we keep the LLM-facing text tight to avoid
     # token-length triggers in mlx-lm.
+    # /no_think prefix is the Qwen3 convention to suppress chain-of-thought
+    # at the prompt level — chat_template_kwargs.enable_thinking is not
+    # honoured by every LM Studio build.
     user = (
+        "/no_think\n"
         "Summarise this method in ONE sentence (max 25 words, present "
         "tense, what it DOES - side effects, IO, control flow). "
         "Output STRICT JSON only: {\"summary\":\"...\"}. "
@@ -285,9 +311,11 @@ def _call_llm(
             {"role": "user", "content": user},
         ],
         "temperature": 0.0,
-        "max_tokens": 120,
-        # Some Qwen3 builds emit chain-of-thought into reasoning_content
-        # by default. We don't need it — the JSON answer is what counts.
+        # Bumped from 120: thinking-mode Qwen3 needs headroom to either
+        # emit the cot AND the JSON, or — when /no_think + enable_thinking
+        # both fail — at least let the cot finish so we can pluck the JSON
+        # from reasoning_content.
+        "max_tokens": 1024,
         "chat_template_kwargs": {"enable_thinking": False},
     }
     url = DEFAULT_LM_URL.rstrip("/") + "/chat/completions"
