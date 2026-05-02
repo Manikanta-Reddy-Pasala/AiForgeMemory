@@ -212,8 +212,12 @@ def _call_llm(
     fresh connection per call is reliable against the same server."""
     import httpx
 
+    # mlx-lm 0.31 hangs / resets on multi-message conversations
+    # (system+user). Folding instructions + content into one user
+    # message is reliable on the same server.
     system = PROMPT_PATH.read_text()
     user = (
+        system + "\n\n---\n"
         f"File: {path}\n"
         f"Language: {lang}\n"
         f"Symbol: {fqname}\n"
@@ -224,7 +228,6 @@ def _call_llm(
     payload = {
         "model": DEFAULT_MODEL,
         "messages": [
-            {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         "temperature": 0.0,
