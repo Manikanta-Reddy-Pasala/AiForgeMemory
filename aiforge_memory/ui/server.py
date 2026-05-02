@@ -242,6 +242,220 @@ def build_app():
         finally:
             drv.close()
 
+    # ── Mutations: add / remove / reindex ────────────────────────────
+
+    # In-memory tracker for background reindex jobs. Dashboard polls
+    # /api/jobs to surface progress without re-running the work.
+    _jobs: dict[str, dict] = {}
+
+    def _job_id() -> str:
+        import uuid as _u
+        return _u.uuid4().hex[:10]
+
+    def _spawn_reindex(*, name: str, path: str, force: bool,
+                       skip_summaries: bool, skip_chunks: bool) -> str:
+        """Run flow.ingest_repo in a daemon thread; track in _jobs."""
+        import threading
+        import time as _t
+        from aiforge_memory.ingest import flow
+        from aiforge_memory.store import state_db
+
+        jid = _job_id()
+        _jobs[jid] = {
+            "id": jid, "name": name, "path": path,
+            "status": "running", "started_at": _t.time(),
+            "force": force, "result": None, "error": None,
+        }
+
+        def _run() -> None:
+            drv = _driver()
+            sc = state_db.connect()
+            try:
+                res = flow.ingest_repo(
+                    repo_name=name, repo_path=path,
+                    driver=drv, state_conn=sc, force=force,
+                    skip_summaries=skip_summaries,
+                    skip_chunks=skip_chunks,
+                )
+                _jobs[jid].update({
+                    "status": "ok",
+                    "finished_at": _t.time(),
+                    "result": {
+                        "files":   getattr(res, "files", 0),
+                        "symbols": getattr(res, "symbols", 0),
+                        "chunks":  getattr(res, "chunks", 0),
+                        "status":  getattr(res, "status", ""),
+                    },
+                })
+            except Exception as exc:  # noqa: BLE001 — surfaced via API
+                _jobs[jid].update({
+                    "status": "error",
+                    "finished_at": _t.time(),
+                    "error": f"{type(exc).__name__}: {exc}"[:500],
+                })
+            finally:
+                try:
+                    drv.close()
+                except Exception:
+                    pass
+                try:
+                    sc.close()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run, name=f"reindex-{name}",
+                         daemon=True).start()
+        return jid
+
+    @app.post("/api/scheduler/add")
+    async def scheduler_add(payload: dict):
+        """Register a new repo with the scheduler. Required: name, path.
+        Optional knobs: interval_seconds, pull, skip_summaries, skip_chunks,
+        use_lsp, timeout_seconds, per_file_seconds, skip_services."""
+        from aiforge_memory.ingest import scheduler as sched
+        from pathlib import Path as _P
+
+        name = (payload.get("name") or "").strip()
+        path = (payload.get("path") or "").strip()
+        if not name or not path:
+            raise HTTPException(400, "name + path required")
+        rp = _P(path).expanduser()
+        if not rp.is_dir():
+            raise HTTPException(400, f"path not a directory: {path}")
+        try:
+            rs = sched.RepoSchedule(
+                name=name, path=str(rp),
+                interval_seconds=int(payload.get("interval_seconds", 600)),
+                pull=bool(payload.get("pull", True)),
+                skip_services=bool(payload.get("skip_services", False)),
+                skip_summaries=bool(payload.get("skip_summaries", False)),
+                skip_chunks=bool(payload.get("skip_chunks", False)),
+                use_lsp=bool(payload.get("use_lsp", False)),
+                timeout_seconds=int(payload.get("timeout_seconds", 1800)),
+                per_file_seconds=float(payload.get("per_file_seconds", 0.0)),
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, f"invalid field: {exc}") from None
+        sched.add_repo(rs)
+        return {"ok": True, "name": name,
+                "hint": "scheduler reloads config each tick; "
+                        "no daemon restart needed"}
+
+    @app.delete("/api/scheduler/{name}")
+    async def scheduler_remove(name: str):
+        from aiforge_memory.ingest import scheduler as sched
+        removed = sched.remove_repo(name)
+        if not removed:
+            raise HTTPException(404, f"no scheduled repo named {name}")
+        return {"ok": True, "name": name}
+
+    @app.post("/api/repo/reindex")
+    async def repo_reindex(payload: dict):
+        """One-shot reindex (force=True by default). Runs in a worker
+        thread; poll /api/jobs/{job_id} for progress."""
+        from aiforge_memory.ingest import scheduler as sched
+
+        name = (payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "name required")
+        # Look up the scheduled path; if not scheduled, caller must pass it.
+        path = (payload.get("path") or "").strip()
+        if not path:
+            cfg = sched.SchedulerConfig.load()
+            for r in cfg.repos:
+                if r.name == name:
+                    path = r.path
+                    break
+        if not path:
+            raise HTTPException(
+                400,
+                f"no scheduled path for {name}; pass `path` in body",
+            )
+        jid = _spawn_reindex(
+            name=name, path=path,
+            force=bool(payload.get("force", True)),
+            skip_summaries=bool(payload.get("skip_summaries", False)),
+            skip_chunks=bool(payload.get("skip_chunks", False)),
+        )
+        return {"job_id": jid, "name": name, "path": path}
+
+    @app.get("/api/jobs")
+    async def jobs_list():
+        # Newest first.
+        return sorted(_jobs.values(),
+                      key=lambda j: j.get("started_at", 0), reverse=True)
+
+    @app.get("/api/jobs/{job_id}")
+    async def jobs_get(job_id: str):
+        j = _jobs.get(job_id)
+        if not j:
+            raise HTTPException(404, f"unknown job {job_id}")
+        return j
+
+    @app.delete("/api/repo/{name}")
+    async def repo_delete(name: str, purge: bool = True,
+                          drop_schedule: bool = True):
+        """Destructive: remove the repo's Neo4j nodes (File_v2 / Symbol_v2 /
+        Chunk_v2 / memory nodes / Repo) and optionally unregister from the
+        scheduler. Returns a per-label count of deleted nodes.
+
+        Query params:
+          purge=true (default)         drop graph nodes
+          drop_schedule=true (default) remove from scheduler.yaml
+        """
+        from aiforge_memory.ingest import scheduler as sched
+
+        deleted = {"files": 0, "symbols": 0, "chunks": 0,
+                   "memory": 0, "repo": 0}
+        if purge:
+            drv = _driver()
+            try:
+                with drv.session() as s:
+                    # Single transaction so a failure mid-cascade rolls
+                    # back rather than leaving orphan nodes.
+                    rec = s.run("""
+                        MATCH (r:Repo {name:$n})
+                        OPTIONAL MATCH (r)-[:CONTAINS_FILE]->(f:File_v2)
+                        OPTIONAL MATCH (f)-[:DEFINES]->(sym:Symbol_v2)
+                        OPTIONAL MATCH (f)-[:CHUNKED_AS]->(c:Chunk_v2)
+                        OPTIONAL MATCH (r)-[:RECORDS]->(mem)
+                        WHERE any(l IN labels(mem)
+                                  WHERE l ENDS WITH '_v2')
+                        WITH r,
+                             collect(DISTINCT f)   AS fs,
+                             collect(DISTINCT sym) AS ss,
+                             collect(DISTINCT c)   AS cs,
+                             collect(DISTINCT mem) AS ms
+                        WITH r, fs, ss, cs, ms,
+                             size(fs) AS nf, size(ss) AS nsym,
+                             size(cs) AS nc, size(ms) AS nm
+                        FOREACH (x IN ss | DETACH DELETE x)
+                        FOREACH (x IN cs | DETACH DELETE x)
+                        FOREACH (x IN fs | DETACH DELETE x)
+                        FOREACH (x IN ms | DETACH DELETE x)
+                        DETACH DELETE r
+                        RETURN nf AS files, nsym AS symbols,
+                               nc AS chunks, nm AS memory
+                    """, n=name).single()
+                    if rec:
+                        deleted.update({
+                            "files":   rec["files"],
+                            "symbols": rec["symbols"],
+                            "chunks":  rec["chunks"],
+                            "memory":  rec["memory"],
+                            "repo":    1,
+                        })
+                    else:
+                        deleted["repo"] = 0
+            finally:
+                drv.close()
+        # Remove from scheduler config — best-effort, non-fatal.
+        scheduler_removed = False
+        if drop_schedule:
+            scheduler_removed = bool(sched.remove_repo(name))
+        return {"name": name, "deleted": deleted,
+                "scheduler_removed": scheduler_removed}
+
     return app
 
 

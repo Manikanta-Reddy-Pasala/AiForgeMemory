@@ -91,6 +91,24 @@
     .memory-counts { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
     .memory-counts .pill-count { padding: 4px 10px; border-radius: 12px; background: var(--hover); font-size: 11px; color: var(--muted); }
     .memory-counts .pill-count strong { color: var(--fg); }
+    /* Action buttons (Reindex / Delete / Add) */
+    .btn-ghost, .btn-danger, .btn-primary { padding: 6px 12px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer; }
+    .btn-ghost { border: 1px solid var(--border); background: var(--card); color: var(--fg); }
+    .btn-ghost:hover { background: var(--hover); border-color: var(--accent); color: var(--accent); }
+    .btn-danger { border: 1px solid var(--bad); background: var(--card); color: var(--bad); margin-left: 6px; }
+    .btn-danger:hover { background: var(--bad-soft); }
+    .btn-primary { border: 1px solid var(--accent); background: var(--accent); color: #fff; font-weight: 600; }
+    .btn-primary:hover { background: #0d5de0; }
+    .add-repo-form { display: grid; grid-template-columns: 140px 1fr; gap: 8px 12px; align-items: center; }
+    .add-repo-form input[type=text], .add-repo-form input[type=number] { padding: 6px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--card); color: var(--fg); font-size: 12px; font-family: inherit; }
+    .add-repo-form input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .add-repo-form .k { color: var(--muted); font-size: 11px; }
+    .add-repo-form .full { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .add-repo-form label.cb { display: inline-flex; gap: 4px; align-items: center; font-size: 11px; color: var(--muted); margin-right: 8px; }
+    .toast { position: fixed; bottom: 20px; right: 20px; padding: 12px 16px; border-radius: 6px; box-shadow: 0 4px 12px rgba(31,40,64,.15); font-size: 12px; max-width: 360px; z-index: 1000; animation: slideIn 0.2s ease-out; }
+    .toast.ok  { background: var(--good-soft); color: var(--good); border: 1px solid var(--good); }
+    .toast.bad { background: var(--bad-soft);  color: var(--bad);  border: 1px solid var(--bad); }
+    @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: none; opacity: 1; } }
   </style>
 </head>
 <body>
@@ -138,6 +156,95 @@ async function api(path, opts={}) {
 
 function spinner(label) {
   return `<div class="spinner-wrap"><div class="spinner"></div><span>${esc(label || 'loading…')}</span></div>`;
+}
+
+function toast(msg, kind='ok', ms=4000) {
+  const el = document.createElement('div');
+  el.className = `toast ${kind}`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), ms);
+}
+
+async function reindexRepo(name, opts={}) {
+  const path = opts.path || '';
+  if (!confirm(`Reindex ${name}? This re-walks the repo and re-summarises files (LLM cost).`)) return;
+  try {
+    const r = await api('/api/repo/reindex', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, path, force: true}),
+    });
+    toast(`reindex queued · job ${r.job_id} · path ${r.path}`, 'ok');
+    pollJob(r.job_id, name);
+  } catch (e) {
+    toast(`reindex failed: ${e.message}`, 'bad', 6000);
+  }
+}
+
+async function pollJob(jobId, name) {
+  for (let i = 0; i < 360; i++) {  // 30 min @ 5s
+    await new Promise(r => setTimeout(r, 5000));
+    let j;
+    try { j = await api(`/api/jobs/${jobId}`); }
+    catch { continue; }
+    if (j.status === 'ok') {
+      const c = j.result || {};
+      toast(`${name} reindex done · files=${c.files} sym=${c.symbols} chunks=${c.chunks}`, 'ok', 8000);
+      // Refresh repos sidebar to pick up new counts.
+      loadRepos();
+      return;
+    }
+    if (j.status === 'error') {
+      toast(`${name} reindex error: ${j.error}`, 'bad', 8000);
+      return;
+    }
+  }
+  toast(`${name} reindex still running after 30 min — check /api/jobs/${jobId}`, 'bad', 8000);
+}
+
+async function deleteRepo(name) {
+  if (!confirm(`Delete ${name}? This permanently drops Files / Symbols / Chunks / Memory nodes from the graph AND removes it from the scheduler. Cannot be undone.`)) return;
+  if (!confirm(`Last chance — really delete ${name}?`)) return;
+  try {
+    const r = await api(`/api/repo/${encodeURIComponent(name)}?purge=true&drop_schedule=true`, { method: 'DELETE' });
+    const d = r.deleted || {};
+    toast(`deleted ${name} · files=${d.files} sym=${d.symbols} chunks=${d.chunks} mem=${d.memory}`, 'ok', 6000);
+    if (activeRepo === name) activeRepo = null;
+    await loadRepos();
+    setView('scheduler');
+  } catch (e) {
+    toast(`delete failed: ${e.message}`, 'bad', 6000);
+  }
+}
+
+async function addRepoSubmit() {
+  const name = $('#ar-name').value.trim();
+  const path = $('#ar-path').value.trim();
+  if (!name || !path) { toast('name + path required', 'bad'); return; }
+  const payload = {
+    name, path,
+    interval_seconds: parseInt($('#ar-interval').value) || 600,
+    timeout_seconds:  parseInt($('#ar-timeout').value)  || 1800,
+    per_file_seconds: parseFloat($('#ar-perfile').value) || 0,
+    pull:           $('#ar-pull').checked,
+    skip_summaries: $('#ar-skipsum').checked,
+    skip_chunks:    $('#ar-skipchunks').checked,
+    use_lsp:        $('#ar-uselsp').checked,
+  };
+  try {
+    await api('/api/scheduler/add', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    toast(`added ${name} to scheduler`, 'ok');
+    // Trigger an immediate first ingest so user doesn't wait for next tick.
+    if (confirm(`Run first ingest for ${name} now?`)) {
+      reindexRepo(name, {path});
+    }
+    loadSchedulerView();
+  } catch (e) {
+    toast(`add failed: ${e.message}`, 'bad', 6000);
+  }
 }
 
 async function loadRepos() {
@@ -257,7 +364,12 @@ async function loadRepoView() {
   $('#view').innerHTML = spinner(`loading ${activeRepo}`);
   try {
     const r = await api(`/api/repo/${encodeURIComponent(activeRepo)}`);
-    let out = `<h2>${esc(activeRepo)}</h2>`;
+    let out = `<h2>${esc(activeRepo)}
+      <span style="float:right">
+        <button class="btn-ghost" onclick="reindexRepo('${esc(activeRepo)}')">⟳ Reindex</button>
+        <button class="btn-danger" onclick="deleteRepo('${esc(activeRepo)}')">🗑 Delete</button>
+      </span>
+    </h2>`;
     out += `<div class="card"><div class="meta-grid">
       <div class="k">path</div><div>${esc(r.meta.path || '')}</div>
       <div class="k">lang</div><div>${esc(r.meta.lang_primary || '?')}</div>
@@ -415,6 +527,28 @@ async function loadSchedulerView() {
       <div class="k">pid</div><div>${esc(s.pid || '(none)')}</div>
       <div class="k">pid file</div><div><code>${esc(s.pid_file || '')}</code></div>
     </div></div>`;
+    out += `<h2>Add repository</h2>
+      <div class="card"><div class="add-repo-form">
+        <div class="k">name</div>
+        <div><input type="text" id="ar-name" placeholder="e.g. MyService"></div>
+        <div class="k">path</div>
+        <div><input type="text" id="ar-path" placeholder="/home/mani/codeRepo/MyService"></div>
+        <div class="k">interval (s)</div>
+        <div><input type="number" id="ar-interval" value="600" style="width:100px"></div>
+        <div class="k">timeout floor (s)</div>
+        <div><input type="number" id="ar-timeout" value="1800" style="width:100px"></div>
+        <div class="k">per-file s</div>
+        <div><input type="number" id="ar-perfile" value="0" step="0.5" style="width:100px"> <span class="latency">0 = fixed timeout; &gt;0 scales by file count</span></div>
+        <div class="k">flags</div>
+        <div class="full">
+          <label class="cb"><input type="checkbox" id="ar-pull" checked> git pull</label>
+          <label class="cb"><input type="checkbox" id="ar-skipsum"> skip summaries</label>
+          <label class="cb"><input type="checkbox" id="ar-skipchunks"> skip chunks</label>
+          <label class="cb"><input type="checkbox" id="ar-uselsp"> use LSP</label>
+        </div>
+        <div></div>
+        <div><button class="btn-primary" onclick="addRepoSubmit()">Add to scheduler</button></div>
+      </div></div>`;
     const repoEntries = Object.values(s.repos || {});
     repoEntries.sort((a, b) => (b.last_run || 0) - (a.last_run || 0));
     out += `<h2>Recent ticks (${repoEntries.length})</h2>`;
@@ -425,11 +559,15 @@ async function loadSchedulerView() {
                 : 'status-ok';
       const when = r.last_run ? new Date(r.last_run * 1000).toLocaleString() : '(never)';
       return `<div class="scheduler-row">
-        <span style="width:200px">${esc(r.name)}</span>
+        <span style="width:180px">${esc(r.name)}</span>
         <span class="${cls}" style="width:120px">${esc(r.last_status || '?')}</span>
-        <span style="width:180px">${esc(when)}</span>
+        <span style="width:160px">${esc(when)}</span>
         <span class="latency">behind ${r.last_behind || 0} · pulled ${r.last_pulled ? '✓' : '✗'}</span>
         ${r.last_error ? `<span class="err">${esc(r.last_error.slice(0,80))}</span>` : ''}
+        <span style="margin-left:auto; display:flex; gap:4px">
+          <button class="btn-ghost" onclick="reindexRepo('${esc(r.name)}')">⟳</button>
+          <button class="btn-danger" onclick="deleteRepo('${esc(r.name)}')">🗑</button>
+        </span>
       </div>`;
     }).join('');
     $('#view').innerHTML = out;
