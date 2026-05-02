@@ -46,6 +46,19 @@ _DOC_EXT: dict[str, str] = {
     ".txt":  "doc-txt",
 }
 
+# Build-manifest filenames — useful metadata for "what depends on what"
+# queries. Indexed as doc-manifest so vector search can surface them.
+_MANIFEST_NAMES: frozenset[str] = frozenset({
+    "pom.xml",
+    "build.gradle", "build.gradle.kts",
+    "settings.gradle", "settings.gradle.kts",
+    "package.json", "package-lock.json",
+    "pyproject.toml", "requirements.txt", "setup.py", "setup.cfg",
+    "cargo.toml", "go.mod", "go.sum",
+    "dockerfile", "docker-compose.yml", "docker-compose.yaml",
+    "makefile", ".env.example",
+})
+
 # Skip these directories when walking — don't index build artifacts.
 _SKIP_DIRS = {
     ".git", ".venv", "venv", "node_modules", "target", "build", "dist",
@@ -79,21 +92,60 @@ class WalkedFile:
 
 
 def lang_for(path: str | Path) -> str | None:
-    suf = Path(path).suffix.lower()
+    p = Path(path)
+    suf = p.suffix.lower()
+    if p.name.lower() in _MANIFEST_NAMES:
+        return "doc-manifest"
     return _EXT_LANG.get(suf) or _DOC_EXT.get(suf)
 
 
 def is_doc(path: str | Path) -> bool:
-    return Path(path).suffix.lower() in _DOC_EXT
+    p = Path(path)
+    return (
+        p.suffix.lower() in _DOC_EXT
+        or p.name.lower() in _MANIFEST_NAMES
+    )
+
+
+def _gitignored_paths(root: Path) -> set[str]:
+    """Use `git ls-files` to enumerate IGNORED paths under root.
+
+    Returns a set of repo-relative paths git would skip. Empty set if
+    the dir isn't a git repo or git CLI fails.
+    Honors .gitignore + global excludes natively — no Python-side
+    pathspec parsing required.
+    """
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["git", "ls-files", "--others", "--ignored",
+             "--exclude-standard", "-z"],
+            cwd=str(root), capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if r.returncode != 0:
+        return set()
+    out = r.stdout.decode("utf-8", "replace") if r.stdout else ""
+    return {p for p in out.split("\0") if p}
 
 
 def walk_repo(repo_path: str | Path, *, repo: str) -> list[WalkedFile]:
     repo_path = Path(repo_path).resolve()
+    ignored = _gitignored_paths(repo_path)
     out: list[WalkedFile] = []
     for path in _iter_source_files(repo_path):
         rel = str(path.relative_to(repo_path))
-        suf = Path(rel).suffix.lower()
-        lang = _EXT_LANG.get(suf) or _DOC_EXT.get(suf)
+        # Honor .gitignore — drop paths git considers ignored.
+        if rel in ignored:
+            continue
+        p = Path(rel)
+        suf = p.suffix.lower()
+        # Manifest files matched by basename, code/docs by suffix.
+        if p.name.lower() in _MANIFEST_NAMES:
+            lang = "doc-manifest"
+        else:
+            lang = _EXT_LANG.get(suf) or _DOC_EXT.get(suf)
         try:
             data = path.read_bytes()
         except (OSError, ValueError):
@@ -103,7 +155,7 @@ def walk_repo(repo_path: str | Path, *, repo: str) -> list[WalkedFile]:
         wf = WalkedFile(repo=repo, path=rel, hash=sha,
                         lang=lang or "other", lines=lines)
         # Code → tree-sitter parse for symbols/imports.
-        # Docs → no parse; just walk so the embedder picks them up.
+        # Docs / manifests → no parse; just walked.
         if suf in _EXT_LANG:
             try:
                 _parse_into(wf, data, lang)
@@ -120,7 +172,9 @@ def _iter_source_files(root: Path):
         if not p.is_file():
             continue
         suf = p.suffix.lower()
-        if suf in _EXT_LANG or suf in _DOC_EXT:
+        if (suf in _EXT_LANG
+                or suf in _DOC_EXT
+                or p.name.lower() in _MANIFEST_NAMES):
             yield p
 
 
