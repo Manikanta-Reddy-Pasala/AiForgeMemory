@@ -206,13 +206,12 @@ def _call_llm(
     *, body: str, signature: str, doc: str,
     lang: str, path: str, fqname: str,
 ) -> str:
-    """Real LLM call. Isolated so tests can monkey-patch."""
-    from openai import OpenAI
+    """Real LLM call. Direct httpx — the OpenAI SDK adds headers /
+    connection-pooling behaviour that mlx-lm 0.31 closes mid-stream
+    on, manifesting as APIConnectionError after ~2s. Plain httpx with
+    fresh connection per call is reliable against the same server."""
+    import httpx
 
-    client = OpenAI(
-        base_url=DEFAULT_LM_URL,
-        api_key=os.environ.get("AIFORGE_CODEMEM_LM_KEY", "lm-studio"),
-    )
     system = PROMPT_PATH.read_text()
     user = (
         f"File: {path}\n"
@@ -222,16 +221,27 @@ def _call_llm(
         + (f"Doc: {doc}\n" if doc else "")
         + f"\nBody:\n{body}\n"
     )
-    # mlx-lm 0.31 rejects response_format=json_object with conn-reset.
-    # Drop it; the parser is already fence-tolerant + balanced-brace
-    # fallback, which covers what local models actually emit.
-    resp = client.chat.completions.create(
-        model=DEFAULT_MODEL,
-        messages=[
+    payload = {
+        "model": DEFAULT_MODEL,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.0,
-        max_tokens=120,
-    )
-    return resp.choices[0].message.content or ""
+        "temperature": 0.0,
+        "max_tokens": 120,
+    }
+    url = DEFAULT_LM_URL.rstrip("/") + "/chat/completions"
+    api_key = os.environ.get("AIFORGE_CODEMEM_LM_KEY", "lm-studio")
+    # Fresh client per call; mlx-lm closes the socket eagerly so a
+    # pooled connection from a previous request is often unusable.
+    with httpx.Client(timeout=120.0) as c:
+        r = c.post(url, json=payload, headers={
+            "Authorization": f"Bearer {api_key}",
+        })
+    r.raise_for_status()
+    body = r.json()
+    choices = body.get("choices") or []
+    if not choices:
+        return ""
+    msg = choices[0].get("message") or {}
+    return msg.get("content") or ""
