@@ -42,10 +42,33 @@ MAX_FILE_BYTES = int(os.environ.get(
 KINDS_RAW = os.environ.get("AIFORGE_SYMSUM_KINDS", "method,function")
 ALLOWED_KINDS = {k.strip().lower() for k in KINDS_RAW.split(",") if k.strip()}
 
-# Cap body size sent to the LLM — long methods get truncated to head+tail
-# so the prompt stays bounded.
-BODY_HEAD_LINES = 80
-BODY_TAIL_LINES = 20
+# Cap body size sent to the LLM. mlx-lm 0.31 wedges on long prompts
+# under sustained load; keep these conservative.
+BODY_HEAD_LINES = int(os.environ.get("AIFORGE_SYMSUM_HEAD_LINES", "30"))
+BODY_TAIL_LINES = int(os.environ.get("AIFORGE_SYMSUM_TAIL_LINES", "5"))
+# Throttle: wait between successive LLM calls so mlx-lm has time to
+# release internal state. 0.0 = no throttle.
+INTER_CALL_DELAY_S = float(os.environ.get(
+    "AIFORGE_SYMSUM_THROTTLE_S", "1.0",
+))
+# Per-request: timeout + retry. mlx-lm sometimes resets first SYN
+# under load — one quick retry recovers most of those.
+REQUEST_TIMEOUT_S = float(os.environ.get(
+    "AIFORGE_SYMSUM_TIMEOUT_S", "120.0",
+))
+RETRY_MAX = int(os.environ.get("AIFORGE_SYMSUM_RETRY_MAX", "1"))
+RETRY_BACKOFF_S = float(os.environ.get(
+    "AIFORGE_SYMSUM_RETRY_BACKOFF_S", "3.0",
+))
+# Circuit breaker — if N consecutive calls fail, abort the whole run
+# rather than burning 2000+ requests against a dead server.
+ABORT_AFTER_CONSECUTIVE_ERRORS = int(os.environ.get(
+    "AIFORGE_SYMSUM_ABORT_AFTER", "8",
+))
+
+
+class SymbolSummaryAborted(RuntimeError):
+    """Raised when the LLM is failing too consistently to continue."""
 
 
 @dataclass
@@ -122,8 +145,11 @@ def summarise_symbols(
     if limit is not None:
         candidates = candidates[:max(0, int(limit))]
 
+    import time as _time
+
     out: list[SymbolSummary] = []
     total = len(candidates)
+    consecutive_errors = 0
     for idx, (wf, sym, _) in enumerate(candidates):
         ss = SymbolSummary(repo=repo, fqname=sym.fqname)
         body = _slice_body(
@@ -150,6 +176,24 @@ def summarise_symbols(
             except Exception:
                 ss.skipped_reason = "llm_error"
         out.append(ss)
+
+        # Circuit breaker — abort if the LLM is dead, rather than
+        # burning the rest of the candidate list.
+        if ss.skipped_reason == "llm_error":
+            consecutive_errors += 1
+        else:
+            consecutive_errors = 0
+        if consecutive_errors >= ABORT_AFTER_CONSECUTIVE_ERRORS:
+            if on_each is not None:
+                try:
+                    on_each(ss, idx + 1, total)
+                except Exception:
+                    pass
+            raise SymbolSummaryAborted(
+                f"{consecutive_errors} consecutive LLM errors — "
+                "aborting; restart the LLM server and retry"
+            )
+
         if on_each is not None:
             try:
                 on_each(ss, idx + 1, total)
@@ -157,6 +201,8 @@ def summarise_symbols(
                 # Callback failure must NOT abort the outer loop —
                 # losing one progress update is acceptable.
                 pass
+        if INTER_CALL_DELAY_S > 0 and idx + 1 < total:
+            _time.sleep(INTER_CALL_DELAY_S)
     return out
 
 
@@ -206,24 +252,32 @@ def _call_llm(
     *, body: str, signature: str, doc: str,
     lang: str, path: str, fqname: str,
 ) -> str:
-    """Real LLM call. Direct httpx — the OpenAI SDK adds headers /
-    connection-pooling behaviour that mlx-lm 0.31 closes mid-stream
-    on, manifesting as APIConnectionError after ~2s. Plain httpx with
-    fresh connection per call is reliable against the same server."""
+    """Real LLM call. Direct httpx + fresh client per call — OpenAI SDK
+    keep-alive behaviour mlx-lm 0.31 doesn't tolerate. Multi-message
+    chats also wedge mlx-lm 0.31, so we fold the system rules into
+    one user message.
+
+    Bounded retry on transient transport errors (RetryMAX backed by
+    AIFORGE_SYMSUM_RETRY_MAX). On 4xx-class errors we abort immediately.
+    """
+    import time as _time
+
     import httpx
 
-    # mlx-lm 0.31 hangs / resets on multi-message conversations
-    # (system+user). Folding instructions + content into one user
-    # message is reliable on the same server.
-    system = PROMPT_PATH.read_text()
+    # Compact "system" instructions inline; the file at PROMPT_PATH is
+    # the reference but here we keep the LLM-facing text tight to avoid
+    # token-length triggers in mlx-lm.
     user = (
-        system + "\n\n---\n"
-        f"File: {path}\n"
-        f"Language: {lang}\n"
+        "Summarise this method in ONE sentence (≤25 words, present "
+        "tense, what it DOES — side effects, IO, control flow). "
+        "Output STRICT JSON only: {\"summary\":\"...\"}. "
+        "If trivial (getter/setter/delegate/DTO), output {\"summary\":\"\"}.\n"
+        "---\n"
         f"Symbol: {fqname}\n"
+        f"Lang: {lang}\n"
         f"Signature: {signature}\n"
         + (f"Doc: {doc}\n" if doc else "")
-        + f"\nBody:\n{body}\n"
+        + f"Body:\n{body}\n"
     )
     payload = {
         "model": DEFAULT_MODEL,
@@ -235,16 +289,33 @@ def _call_llm(
     }
     url = DEFAULT_LM_URL.rstrip("/") + "/chat/completions"
     api_key = os.environ.get("AIFORGE_CODEMEM_LM_KEY", "lm-studio")
-    # Fresh client per call; mlx-lm closes the socket eagerly so a
-    # pooled connection from a previous request is often unusable.
-    with httpx.Client(timeout=120.0) as c:
-        r = c.post(url, json=payload, headers={
-            "Authorization": f"Bearer {api_key}",
-        })
-    r.raise_for_status()
-    body = r.json()
-    choices = body.get("choices") or []
-    if not choices:
-        return ""
-    msg = choices[0].get("message") or {}
-    return msg.get("content") or ""
+
+    last_exc: Exception | None = None
+    for attempt in range(RETRY_MAX + 1):
+        try:
+            with httpx.Client(timeout=REQUEST_TIMEOUT_S) as c:
+                r = c.post(url, json=payload, headers={
+                    "Authorization": f"Bearer {api_key}",
+                })
+            # mlx-lm 4xx → permanent (bad model id, bad payload). 5xx →
+            # transient (worth one retry).
+            if 400 <= r.status_code < 500:
+                r.raise_for_status()
+            r.raise_for_status()
+            doc_body = r.json()
+            choices = doc_body.get("choices") or []
+            if not choices:
+                return ""
+            msg = choices[0].get("message") or {}
+            return msg.get("content") or ""
+        except (httpx.HTTPStatusError,):
+            raise  # 4xx — don't retry
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt >= RETRY_MAX:
+                raise
+            _time.sleep(RETRY_BACKOFF_S)
+    # Defensive — loop above always returns or raises.
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("symbol_summary._call_llm: unreachable")

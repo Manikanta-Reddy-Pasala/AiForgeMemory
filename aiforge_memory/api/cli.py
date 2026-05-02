@@ -201,11 +201,21 @@ def _cmd_summarise_symbols(args: argparse.Namespace) -> int:
                     **counts,
                 }), flush=True)
 
-        summaries = symbol_summary.summarise_symbols(
-            walked, repo=args.repo, repo_root=path,
-            limit=args.limit, min_lines=args.min_lines,
-            on_each=_on_each,
-        )
+        try:
+            summaries = symbol_summary.summarise_symbols(
+                walked, repo=args.repo, repo_root=path,
+                limit=args.limit, min_lines=args.min_lines,
+                on_each=_on_each,
+            )
+        except symbol_summary.SymbolSummaryAborted as exc:
+            print(json.dumps({
+                "stage": "aborted",
+                "reason": str(exc),
+                "hint": "restart mlx-lm on MS, then rerun "
+                        "(already-written summaries are kept).",
+                **counts,
+            }, indent=2))
+            return 2
     finally:
         drv.close()
     print(json.dumps({
