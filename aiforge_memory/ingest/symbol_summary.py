@@ -294,10 +294,21 @@ def _call_llm(
     # honoured by every LM Studio build.
     user = (
         "/no_think\n"
-        "Summarise this method in ONE sentence (max 25 words, present "
-        "tense, what it DOES - side effects, IO, control flow). "
-        "Output STRICT JSON only: {\"summary\":\"...\"}. "
-        "If trivial (getter/setter/delegate/DTO), output {\"summary\":\"\"}.\n"
+        "Task: summarise the method below in ONE sentence (max 25 words, "
+        "present tense). Focus on what it DOES — side effects, IO, "
+        "control flow, error paths. Skip type paraphrase.\n"
+        "\n"
+        "Output: a single JSON object on one line, key 'summary', value "
+        "is your sentence. If the method is trivial (pure getter/setter/"
+        "delegate/DTO), the value MUST be the empty string.\n"
+        "\n"
+        "Example output for a JWT generator:\n"
+        '{"summary": "Generates a JWT for the given user, signing it with the configured HS256 key."}\n'
+        "Example output for a getter:\n"
+        '{"summary": ""}\n'
+        "\n"
+        "DO NOT echo this prompt. DO NOT output the literal three-dot "
+        "placeholder.\n"
         "---\n"
         f"Symbol: {fqname}\n"
         f"Lang: {lang}\n"
