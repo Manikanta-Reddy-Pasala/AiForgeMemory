@@ -167,17 +167,36 @@ function toast(msg, kind='ok', ms=4000) {
 }
 
 async function reindexRepo(name, opts={}) {
-  const path = opts.path || '';
+  let path = opts.path || '';
   if (!confirm(`Reindex ${name}? This re-walks the repo and re-summarises files (LLM cost).`)) return;
-  try {
-    const r = await api('/api/repo/reindex', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name, path, force: true}),
-    });
-    toast(`reindex queued · job ${r.job_id} · path ${r.path}`, 'ok');
-    pollJob(r.job_id, name);
-  } catch (e) {
-    toast(`reindex failed: ${e.message}`, 'bad', 6000);
+  let attempt = 0;
+  while (attempt < 2) {
+    try {
+      const r = await api('/api/repo/reindex', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name, path, force: true}),
+      });
+      const where = r.path_source ? ` (${r.path_source})` : '';
+      toast(`reindex queued · job ${r.job_id}${where} · ${r.path}`, 'ok');
+      pollJob(r.job_id, name);
+      return;
+    } catch (e) {
+      // 400 with no path resolvable → ask user for the local path.
+      const looksLikeNoPath = /no path known|not a directory|path required/i.test(e.message);
+      if (attempt === 0 && looksLikeNoPath) {
+        const guess = prompt(
+          `${name} has no path on this host yet.\n` +
+          `Enter the local path (e.g. /home/mani/codeRepo/${name}):`,
+          `/home/mani/codeRepo/${name}`,
+        );
+        if (!guess) { toast('reindex cancelled', 'bad', 3000); return; }
+        path = guess.trim();
+        attempt += 1;
+        continue;
+      }
+      toast(`reindex failed: ${e.message}`, 'bad', 6000);
+      return;
+    }
   }
 }
 

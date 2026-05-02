@@ -352,32 +352,70 @@ def build_app():
     @app.post("/api/repo/reindex")
     async def repo_reindex(payload: dict):
         """One-shot reindex (force=True by default). Runs in a worker
-        thread; poll /api/jobs/{job_id} for progress."""
+        thread; poll /api/jobs/{job_id} for progress.
+
+        Path resolution order:
+          1. payload['path']               explicit caller override
+          2. scheduler.yaml entry          if registered
+          3. Neo4j Repo node               from `path` / `local_path`
+                                           field (set on first ingest)
+        """
+        from pathlib import Path as _P
         from aiforge_memory.ingest import scheduler as sched
 
         name = (payload.get("name") or "").strip()
         if not name:
             raise HTTPException(400, "name required")
-        # Look up the scheduled path; if not scheduled, caller must pass it.
+
         path = (payload.get("path") or "").strip()
+        path_source = "payload"
+
         if not path:
             cfg = sched.SchedulerConfig.load()
             for r in cfg.repos:
                 if r.name == name:
                     path = r.path
+                    path_source = "scheduler"
                     break
+
+        if not path:
+            # Fall back to Neo4j: many older repos have a Repo node but
+            # were never registered with the scheduler.
+            drv = _driver()
+            try:
+                with drv.session() as s:
+                    rec = s.run(
+                        "MATCH (r:Repo {name:$n}) "
+                        "RETURN coalesce(r.path, r.local_path, "
+                        "                r.repo_path, '') AS p",
+                        n=name,
+                    ).single()
+                if rec and rec["p"]:
+                    path = rec["p"]
+                    path_source = "neo4j"
+            finally:
+                drv.close()
+
         if not path:
             raise HTTPException(
                 400,
-                f"no scheduled path for {name}; pass `path` in body",
+                f"no path known for {name}; pass `path` in body or "
+                "register it via /api/scheduler/add",
             )
+        if not _P(path).expanduser().is_dir():
+            raise HTTPException(
+                400,
+                f"path resolved to {path} but is not a directory",
+            )
+
         jid = _spawn_reindex(
             name=name, path=path,
             force=bool(payload.get("force", True)),
             skip_summaries=bool(payload.get("skip_summaries", False)),
             skip_chunks=bool(payload.get("skip_chunks", False)),
         )
-        return {"job_id": jid, "name": name, "path": path}
+        return {"job_id": jid, "name": name, "path": path,
+                "path_source": path_source}
 
     @app.get("/api/jobs")
     async def jobs_list():
