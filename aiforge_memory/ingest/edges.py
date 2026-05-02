@@ -21,7 +21,8 @@ from tree_sitter import Query, QueryCursor
 from tree_sitter_language_pack import get_language, get_parser
 
 from aiforge_memory.ingest.treesitter_walk import (
-    WalkedFile, _load_query, lang_for,
+    WalkedFile,
+    _load_query,
 )
 
 

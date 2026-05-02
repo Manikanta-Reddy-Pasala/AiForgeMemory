@@ -5,7 +5,6 @@ from pathlib import Path
 
 from aiforge_memory.ingest import treesitter_walk as tsw
 
-
 FIX = Path(__file__).parent / "fixtures" / "poly_repo"
 
 

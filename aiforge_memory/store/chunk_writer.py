@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from aiforge_memory.ingest.embed import WalkedChunk
 
-
 _UPSERT_CHUNK = """
 MERGE (c:Chunk_v2 {id: $id})
 SET c.repo        = $repo,

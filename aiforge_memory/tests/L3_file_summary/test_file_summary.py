@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 from aiforge_memory.ingest import file_summary as fs
 from aiforge_memory.ingest.treesitter_walk import WalkedFile, WalkedSymbol
-
 
 GOOD_RESPONSE = json.dumps({
     "summary": "FastAPI HTTP service exposing /payments/process and /health.",

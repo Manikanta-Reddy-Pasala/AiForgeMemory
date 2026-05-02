@@ -8,7 +8,6 @@ import pytest
 
 from aiforge_memory.ingest import repo_summary as rs
 
-
 FIX = Path(__file__).parent / "fixtures"
 
 

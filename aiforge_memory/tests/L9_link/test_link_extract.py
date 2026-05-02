@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from aiforge_memory.ingest import link
 
-
 # ─── HTTP server route capture ────────────────────────────────────────
 
 def test_request_mapping_extracted(driver_stub: type | None = None) -> None:

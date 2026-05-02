@@ -26,9 +26,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-from aiforge_memory.ingest import delta, flow, link
+from aiforge_memory.ingest import delta, flow, link, scheduler
+from aiforge_memory.ops import backup as ops_backup
+from aiforge_memory.ops import health as ops_health
 from aiforge_memory.store import (
-    link_writer, memory_writer, schema, state_db as sdb,
+    link_writer,
+    memory_writer,
+    schema,
+)
+from aiforge_memory.store import (
+    state_db as sdb,
 )
 
 
@@ -42,8 +49,9 @@ def _driver():
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
+    from dataclasses import asdict, is_dataclass
+
     from aiforge_memory.config import RepoConfig
-    from dataclasses import asdict
 
     repo_path = args.path or os.getcwd()
     cfg = RepoConfig.load(repo_path, name=args.repo)
@@ -60,6 +68,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
             driver=drv, state_conn=state,
             skip_summaries=cfg.skip_summaries,
             skip_chunks=cfg.skip_chunks,
+            use_lsp=args.lsp,
         )
         if res.status == "cold_start_required":
             # Auto-fall-through to full ingest on first run.
@@ -70,6 +79,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
                 skip_symbols=cfg.skip_symbols,
                 skip_summaries=cfg.skip_summaries,
                 skip_chunks=cfg.skip_chunks,
+                use_lsp=args.lsp,
             )
     else:
         res = flow.ingest_repo(
@@ -82,9 +92,17 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
             skip_symbols=cfg.skip_symbols,
             skip_summaries=cfg.skip_summaries,
             skip_chunks=cfg.skip_chunks,
+            use_lsp=args.lsp,
         )
+    if is_dataclass(res):
+        base = asdict(res)
+    else:
+        # Defensive: tests may stub ingest with a plain object.
+        base = {k: getattr(res, k) for k in (
+            "status", "pack_sha", "repo",
+        ) if hasattr(res, k)}
     payload = {
-        **asdict(res),
+        **base,
         "config_loaded_from": str(
             (Path(repo_path) / ".aiforge" / "codemem.yaml").resolve()
         ),
@@ -348,11 +366,106 @@ def _cmd_eval(args: argparse.Namespace) -> int:
 def _cmd_install_hook(args: argparse.Namespace) -> int:
     repo_path = args.path or os.getcwd()
     try:
-        path = delta.install_post_commit_hook(repo_path, args.repo)
+        commit_hook = delta.install_post_commit_hook(repo_path, args.repo)
+        merge_hook = delta.install_post_merge_hook(repo_path, args.repo)
     except FileNotFoundError as exc:
         print(json.dumps({"error": str(exc)}))
         return 1
-    print(json.dumps({"installed": str(path)}, indent=2))
+    print(json.dumps({
+        "installed_post_commit": str(commit_hook),
+        "installed_post_merge": str(merge_hook),
+    }, indent=2))
+    return 0
+
+
+# ─── Scheduler ────────────────────────────────────────────────────────
+
+def _cmd_schedule_add(args: argparse.Namespace) -> int:
+    rs = scheduler.RepoSchedule(
+        name=args.repo,
+        path=str(Path(args.path or os.getcwd()).resolve()),
+        interval_seconds=args.interval,
+        pull=not args.no_pull,
+        skip_summaries=args.skip_summaries,
+        skip_chunks=args.skip_chunks,
+    )
+    scheduler.add_repo(rs)
+    print(json.dumps({"added": rs.__dict__,
+                      "config": str(scheduler.CONFIG_PATH)}, indent=2))
+    return 0
+
+
+def _cmd_schedule_remove(args: argparse.Namespace) -> int:
+    ok = scheduler.remove_repo(args.repo)
+    print(json.dumps({"removed": ok, "repo": args.repo}))
+    return 0 if ok else 1
+
+
+def _cmd_schedule_list(_args: argparse.Namespace) -> int:
+    cfg = scheduler.SchedulerConfig.load()
+    print(json.dumps({
+        "config": str(scheduler.CONFIG_PATH),
+        "repos": [r.__dict__ for r in cfg.repos],
+    }, indent=2))
+    return 0
+
+
+def _cmd_schedule_run(args: argparse.Namespace) -> int:
+    scheduler.run_loop(once=args.once)
+    return 0
+
+
+def _cmd_schedule_daemon(_args: argparse.Namespace) -> int:
+    pid = scheduler.daemonize()
+    print(json.dumps({"daemon_pid": pid,
+                      "log": str(scheduler.LOG_PATH)}, indent=2))
+    return 0 if pid > 0 else 1
+
+
+def _cmd_schedule_stop(_args: argparse.Namespace) -> int:
+    ok = scheduler.stop_daemon()
+    print(json.dumps({"stopped": ok}))
+    return 0 if ok else 1
+
+
+def _cmd_schedule_status(_args: argparse.Namespace) -> int:
+    print(json.dumps(scheduler.daemon_status(), indent=2, default=str))
+    return 0
+
+
+# ─── Health watchdog ──────────────────────────────────────────────────
+
+def _cmd_health(args: argparse.Namespace) -> int:
+    report = ops_health.check_all()
+    ops_health.write_snapshot(report)
+    if args.table:
+        print(ops_health.render_table(report))
+    else:
+        from dataclasses import asdict
+        print(json.dumps({
+            "ts": report.ts,
+            "overall_ok": report.overall_ok,
+            "checks": [asdict(c) for c in report.checks],
+        }, indent=2))
+    return 0 if report.overall_ok else 1
+
+
+# ─── Ops (backup + log rotate) ────────────────────────────────────────
+
+def _cmd_ops_backup(args: argparse.Namespace) -> int:
+    res = ops_backup.backup_state()
+    rotated = ops_backup.rotate_backups(keep=args.keep)
+    print(json.dumps({
+        "backed_up": res.backed_up,
+        "rotated_out": rotated.rotated_out,
+        "errors": res.errors + rotated.errors,
+    }, indent=2))
+    return 0 if not (res.errors or rotated.errors) else 1
+
+
+def _cmd_ops_rotate_logs(_args: argparse.Namespace) -> int:
+    out = ops_backup.rotate_known_logs()
+    print(json.dumps({"rotated": out}, indent=2))
     return 0
 
 
@@ -367,6 +480,9 @@ def main(argv: list[str] | None = None) -> int:
                      help="Re-run even if pack_sha matches")
     ing.add_argument("--delta", action="store_true",
                      help="Re-index only files changed since last ingest")
+    ing.add_argument("--lsp", action="store_true",
+                     help="Layer LSP-confirmed CALLS on top of tree-sitter "
+                          "heuristic (per-language adapter required on PATH)")
     ing.set_defaults(func=_cmd_ingest)
 
     st = sub.add_parser("stats", help="Print Repo node summary")
@@ -451,11 +567,75 @@ def main(argv: list[str] | None = None) -> int:
     ev.set_defaults(func=_cmd_eval)
 
     # ─── Hook installer ───────────────────────────────────────────────
-    ih = sub.add_parser("install-hook",
-                        help="Install git post-commit hook for delta ingest")
+    ih = sub.add_parser(
+        "install-hook",
+        help="Install git post-commit + post-merge hooks for delta ingest",
+    )
     ih.add_argument("repo")
     ih.add_argument("--path", help="Repo dir; defaults to CWD")
     ih.set_defaults(func=_cmd_install_hook)
+
+    # ─── Scheduler ────────────────────────────────────────────────────
+    sc = sub.add_parser(
+        "schedule",
+        help="Periodic git fetch/pull + delta ingest daemon",
+    )
+    sc_sub = sc.add_subparsers(dest="schedule_cmd", required=True)
+
+    sc_add = sc_sub.add_parser("add", help="Add a repo to the schedule")
+    sc_add.add_argument("repo")
+    sc_add.add_argument("--path", help="Repo dir; defaults to CWD")
+    sc_add.add_argument("--interval", type=int, default=600,
+                        help="poll interval in seconds (default 600)")
+    sc_add.add_argument("--no-pull", action="store_true",
+                        help="fetch only — do not run git pull --ff-only")
+    sc_add.add_argument("--skip-summaries", action="store_true")
+    sc_add.add_argument("--skip-chunks", action="store_true")
+    sc_add.set_defaults(func=_cmd_schedule_add)
+
+    sc_rm = sc_sub.add_parser("remove", help="Remove a repo from the schedule")
+    sc_rm.add_argument("repo")
+    sc_rm.set_defaults(func=_cmd_schedule_remove)
+
+    sc_ls = sc_sub.add_parser("list", help="List scheduled repos")
+    sc_ls.set_defaults(func=_cmd_schedule_list)
+
+    sc_run = sc_sub.add_parser("run",
+                               help="Run loop in foreground (Ctrl-C to stop)")
+    sc_run.add_argument("--once", action="store_true",
+                        help="single tick over each repo, then exit")
+    sc_run.set_defaults(func=_cmd_schedule_run)
+
+    sc_dm = sc_sub.add_parser("daemon",
+                              help="Fork into background (POSIX)")
+    sc_dm.set_defaults(func=_cmd_schedule_daemon)
+
+    sc_st = sc_sub.add_parser("stop", help="Stop the running daemon (SIGTERM)")
+    sc_st.set_defaults(func=_cmd_schedule_stop)
+
+    sc_status = sc_sub.add_parser("status",
+                                  help="JSON: pid + per-repo last_run / next_run")
+    sc_status.set_defaults(func=_cmd_schedule_status)
+
+    # ─── Health ───────────────────────────────────────────────────────
+    hc = sub.add_parser("health",
+                        help="Probe Neo4j + LM + embed + rerank sidecars")
+    hc.add_argument("--table", action="store_true")
+    hc.set_defaults(func=_cmd_health)
+
+    # ─── Ops (backup, log rotate) ─────────────────────────────────────
+    ops = sub.add_parser("ops",
+                         help="Operational helpers: backup + log rotation")
+    ops_sub = ops.add_subparsers(dest="ops_cmd", required=True)
+
+    ops_b = ops_sub.add_parser("backup",
+                               help="VACUUM INTO snapshot of state.db; rotates oldest")
+    ops_b.add_argument("--keep", type=int, default=7)
+    ops_b.set_defaults(func=_cmd_ops_backup)
+
+    ops_r = ops_sub.add_parser("rotate-logs",
+                               help="Rotate AiForge logs over 10MB")
+    ops_r.set_defaults(func=_cmd_ops_rotate_logs)
 
     args = p.parse_args(argv)
     return args.func(args)

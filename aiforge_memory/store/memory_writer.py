@@ -22,8 +22,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any, Iterable
-
+from collections.abc import Iterable
 
 _SCHEMA_VERSION = "codemem-v1"
 

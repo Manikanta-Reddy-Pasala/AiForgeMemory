@@ -8,7 +8,6 @@ import pytest
 
 from aiforge_memory.ingest import pack_repo
 
-
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "tiny_repo"
 
 

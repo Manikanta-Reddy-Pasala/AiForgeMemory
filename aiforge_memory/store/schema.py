@@ -12,7 +12,6 @@ adds its own missing pieces.
 """
 from __future__ import annotations
 
-
 _REPO_NAME_CONSTRAINT_NAME = "codemem_repo_name_unique"
 
 _INDEX_STATEMENTS: list[str] = [
@@ -102,9 +101,11 @@ _INDEX_STATEMENTS: list[str] = [
     "CREATE INDEX codemem_symbol_visibility IF NOT EXISTS "
     "FOR (s:Symbol_v2) ON (s.repo, s.visibility)",
 
-    # Cross-repo edge has no node label of its own; nothing to index, but
-    # we record the schema marker on the relationship:
-    # (Repo)-[:CALLS_REPO {via, evidence, confidence, created_at}]->(Repo)
+    # Cross-repo edge — index on (via, confidence) so list-edges queries
+    # don't trigger "relationship type unknown" warnings before any
+    # CALLS_REPO edges have been written.
+    "CREATE INDEX codemem_calls_repo_via IF NOT EXISTS "
+    "FOR ()-[r:CALLS_REPO]-() ON (r.via, r.confidence)",
 ]
 
 

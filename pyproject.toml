@@ -38,6 +38,9 @@ include = ["aiforge_memory*"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = [
+  "aiforge_memory/tests/**/fixtures/**",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

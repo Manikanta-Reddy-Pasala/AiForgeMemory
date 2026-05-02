@@ -26,7 +26,7 @@ SET r.evidence   = $evidence,
 """
 
 
-def upsert_calls_repo(driver, *, edge: "CrossRepoEdge") -> None:
+def upsert_calls_repo(driver, *, edge: "CrossRepoEdge") -> None:  # noqa: UP037 — circular import
     with driver.session() as s:
         s.run(
             _UPSERT_CALLS_REPO,

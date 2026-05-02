@@ -1,7 +1,6 @@
 """L1 — CLI dispatch + doctor exit codes."""
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from aiforge_memory.api import cli

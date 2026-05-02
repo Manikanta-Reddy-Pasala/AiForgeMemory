@@ -83,6 +83,7 @@ def translate(
     vector_files: list[str] = []
     fulltext_files: list[str] = []
     candidate_symbols: list[str] = []
+    file_scores: dict[str, float] = {}
     try:
         vec = _embed_query(expanded)
         rows = _vector_topk(driver, repo=repo, vec=vec, k=max(top_k * 3, 50))
@@ -90,6 +91,8 @@ def translate(
             fp = r.get("file_path")
             if fp and fp not in vector_files:
                 vector_files.append(fp)
+                file_scores[fp] = max(file_scores.get(fp, 0.0),
+                                      float(r.get("score") or 0.0))
         candidate_symbols = _symbols_in(driver, repo=repo, files=vector_files[:top_k])
         g.used_top_k = len(rows)
     except Exception as exc:
@@ -139,11 +142,22 @@ def translate(
     # Service catalog
     services = _services_for(driver, repo=repo)
 
+    # Hydrate file summaries for translator grounding (skip on error —
+    # falls back to path-only grounding which is the prior behaviour).
+    file_summaries: dict[str, str] = {}
+    try:
+        file_summaries = _file_summaries(
+            driver, repo=repo, paths=candidate_files,
+        )
+    except Exception as exc:
+        g.errors.append(f"summaries: {exc}")
+
     # T2 — LLM grounding
     try:
         raw = _call_llm(
             text=text, services=services,
             files=candidate_files, symbols=candidate_symbols,
+            file_summaries=file_summaries, file_scores=file_scores,
         )
         parsed = _parse(raw)
         if parsed:
@@ -419,6 +433,22 @@ def _expand_one_hop(driver, *, repo: str, files: list[str]) -> list[str]:
     return out[:20]
 
 
+def _file_summaries(
+    driver, *, repo: str, paths: list[str],
+) -> dict[str, str]:
+    """Bulk-fetch File_v2.summary for the candidate paths.
+    Empty summaries (skipped or unindexed) are omitted from the result."""
+    if not paths:
+        return {}
+    cy = (
+        "MATCH (f:File_v2 {repo:$repo}) WHERE f.path IN $paths "
+        "AND f.summary IS NOT NULL AND f.summary <> '' "
+        "RETURN f.path AS path, f.summary AS summary"
+    )
+    with driver.session() as s:
+        return {r["path"]: r["summary"] for r in s.run(cy, repo=repo, paths=paths)}
+
+
 def _services_for(driver, *, repo: str) -> list[str]:
     with driver.session() as s:
         rows = list(s.run(
@@ -446,8 +476,14 @@ def _call_llm(
     services: list[str],
     files: list[str],
     symbols: list[str],
+    file_summaries: dict[str, str] | None = None,
+    file_scores: dict[str, float] | None = None,
 ) -> str:
-    """Real LLM call. Isolated for monkey-patching in tests."""
+    """Real LLM call. Isolated for monkey-patching in tests.
+
+    file_summaries: optional {path: summary} so the LLM grounds on
+    semantics, not just filename. file_scores: optional {path: score}
+    so the LLM weights vector-confidence into its pick."""
     from openai import OpenAI
 
     client = OpenAI(
@@ -455,10 +491,22 @@ def _call_llm(
         api_key=os.environ.get("AIFORGE_CODEMEM_LM_KEY", "lm-studio"),
     )
     system = _system_prompt()
+
+    # Build enriched candidate_files: each entry is {path, summary?, score?}
+    # so the LLM has semantic + ranking context, not just a path string.
+    enriched_files: list[dict] = []
+    for p in files:
+        item: dict = {"path": p}
+        if file_summaries and file_summaries.get(p):
+            item["summary"] = file_summaries[p][:300]
+        if file_scores and p in file_scores:
+            item["score"] = round(float(file_scores[p]), 3)
+        enriched_files.append(item)
+
     payload = {
         "query": text,
         "services_catalog": services,
-        "candidate_files": files,
+        "candidate_files": enriched_files,
         "candidate_symbols": symbols,
     }
     user = json.dumps(payload, indent=2)
@@ -480,20 +528,32 @@ def _system_prompt() -> str:
         "You ground a natural-language code query against a known catalog.\n"
         "Input: JSON with `query`, `services_catalog`, `candidate_files`, `candidate_symbols`.\n"
         "\n"
+        "candidate_files entries are objects: {path, summary, score}.\n"
+        "  - `summary` describes what the file actually does (LLM-generated).\n"
+        "  - `score` is the vector-similarity rank (higher = more relevant).\n"
+        "\n"
         "Output: a single JSON object — no prose, no markdown fences.\n"
         "{\n"
         '  "intent":   string  (one of "fix" | "add" | "investigate" | "refactor" | "test" | "ops"),\n'
         '  "services": array of strings — MUST be names from services_catalog,\n'
-        '  "files":    array of strings — MUST be paths from candidate_files,\n'
+        '  "files":    array of strings — MUST be paths from candidate_files[].path,\n'
         '  "symbols":  array of strings — MUST be fqnames from candidate_symbols,\n'
         '  "hops":     1 or 2,\n'
         '  "keywords": array of short tokens for downstream rerank\n'
         "}\n"
         "\n"
-        "Rules:\n"
-        "- Pick at most 3 services, 5 files, 8 symbols.\n"
-        "- Never invent names. Anything not in the catalog/candidates is dropped.\n"
-        "- Prefer the most specific match. If query mentions a service, list it.\n"
-        "- Use hops=2 only when the query implies cross-service traversal.\n"
-        "- Output ONLY the JSON object."
+        "Grounding rules (prioritised):\n"
+        "1. Strong-noun-match — if the query contains a domain noun "
+        "(e.g. 'retry', 'auth', 'sync', 'webhook') AND a candidate file's "
+        "path or summary contains that noun, prefer that file.\n"
+        "2. Summary-semantic match — pick files whose summary best "
+        "describes the *behaviour* the query asks about, not just the "
+        "topic area.\n"
+        "3. Vector-score tiebreak — when multiple candidates match by "
+        "rules 1+2, prefer the higher score.\n"
+        "4. Pick at most 3 services, 5 files, 8 symbols.\n"
+        "5. Never invent names. Anything not in the catalog/candidates "
+        "is dropped.\n"
+        "6. Use hops=2 only when the query implies cross-service traversal.\n"
+        "7. Output ONLY the JSON object."
     )

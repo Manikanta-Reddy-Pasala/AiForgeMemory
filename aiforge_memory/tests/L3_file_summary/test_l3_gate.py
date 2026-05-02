@@ -12,10 +12,10 @@ from unittest.mock import patch
 
 import pytest
 
-from aiforge_memory.ingest import flow, repo_summary as rs
-from aiforge_memory.ingest.service_extract import ServiceDraft
-from aiforge_memory.store import schema, state_db as sdb
-
+from aiforge_memory.ingest import flow
+from aiforge_memory.ingest import repo_summary as rs
+from aiforge_memory.store import schema
+from aiforge_memory.store import state_db as sdb
 
 HERE = Path(__file__).parent
 POLY = HERE.parent / "L4_symbols" / "fixtures" / "poly_repo"

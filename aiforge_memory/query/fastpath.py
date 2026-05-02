@@ -8,7 +8,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-
 # Class.method or package.Class.method (last segment is the method)
 _SYMBOL_RE = re.compile(r"\b([A-Z][A-Za-z0-9_]+)(?:\.([a-z_][A-Za-z0-9_]*))+\b")
 # Ticket id: ABC-123

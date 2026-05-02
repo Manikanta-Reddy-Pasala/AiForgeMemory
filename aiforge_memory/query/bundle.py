@@ -6,7 +6,6 @@ Public surface:
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 
 from aiforge_memory.query import fastpath, translator

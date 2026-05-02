@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from aiforge_memory.ingest.service_extract import ServiceDraft
 
-
 _UPSERT_SERVICE = """
 MERGE (s:Service {repo: $repo, name: $name})
 SET s.description = $description,

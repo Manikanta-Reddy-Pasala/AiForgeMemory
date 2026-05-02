@@ -29,11 +29,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from aiforge_memory.ingest import (
-    edges, embed, file_summary, treesitter_walk,
+    edges,
+    embed,
+    file_summary,
+    git_meta,
+    treesitter_walk,
 )
 from aiforge_memory.ingest.flow import IngestResult
 from aiforge_memory.store import (
-    chunk_writer, file_summary_writer, state_db as sdb, symbol_writer,
+    chunk_writer,
+    file_summary_writer,
+    repo_writer,
+    symbol_writer,
+)
+from aiforge_memory.store import (
+    state_db as sdb,
 )
 
 
@@ -196,6 +206,7 @@ def ingest_delta(
     state_conn,
     skip_summaries: bool = False,
     skip_chunks: bool = False,
+    use_lsp: bool = False,
 ) -> IngestResult:
     """Re-index only changed files. Returns IngestResult with status
     'delta_applied' | 'no_changes' | 'cold_start_required'."""
@@ -240,6 +251,16 @@ def ingest_delta(
         call_edges = edges.resolve_calls_with_source(
             walked, repo=repo_name, repo_root=repo_path,
         )
+        if use_lsp:
+            try:
+                from aiforge_memory.ingest.flow import _merge_calls
+                from aiforge_memory.ingest.lsp import resolve_calls as lsp_resolve
+                lsp_edges = lsp_resolve(
+                    walked, repo=repo_name, repo_root=repo_path,
+                )
+                call_edges = _merge_calls(call_edges, lsp_edges)
+            except Exception:  # noqa: BLE001
+                pass
         ccounts = symbol_writer.upsert_call_edges(
             driver, repo=repo_name, edges=call_edges,
             file_paths=[wf.path for wf in walked],
@@ -276,6 +297,14 @@ def ingest_delta(
             state_conn, repo=repo_name,
             head_sha=cs.head_sha, branch=cs.branch,
         )
+
+    # Refresh git metadata on the Repo node (head_sha, branch, dirty).
+    try:
+        gmeta = git_meta.read(repo_path)
+        if gmeta.head_sha:
+            repo_writer.update_git_meta(driver, name=repo_name, git_meta=gmeta)
+    except Exception:  # noqa: BLE001 — metadata refresh is best-effort
+        pass
 
     return IngestResult(
         status="delta_applied",
@@ -329,19 +358,59 @@ def _detach_files(driver, *, repo: str, paths: list[str]) -> None:
 _POST_COMMIT_TEMPLATE = """#!/bin/sh
 # AiForgeMemory delta-ingest hook (auto-installed)
 # Re-runs incremental ingest after each commit. Safe to remove.
-exec aiforge-memory ingest "{repo_name}" --path "{repo_path}" --delta >/dev/null 2>&1 &
+# Source env profile so Neo4j/LM/embed URLs are present (hooks run
+# without the user's interactive shell env).
+[ -f "$HOME/.aiforge/env.sh" ] && . "$HOME/.aiforge/env.sh"
+LOG="$HOME/.aiforge/hook.log"
+(aiforge-memory ingest "{repo_name}" --path "{repo_path}" --delta >>"$LOG" 2>&1 &) &
+"""
+
+
+_POST_MERGE_TEMPLATE = """#!/bin/sh
+# AiForgeMemory delta-ingest hook (post-merge)
+# Fires after `git pull` / `git merge` succeeds. Safe to remove.
+# Source env profile so Neo4j/LM/embed URLs are present (hooks run
+# without the user's interactive shell env).
+[ -f "$HOME/.aiforge/env.sh" ] && . "$HOME/.aiforge/env.sh"
+LOG="$HOME/.aiforge/hook.log"
+(aiforge-memory ingest "{repo_name}" --path "{repo_path}" --delta >>"$LOG" 2>&1 &) &
 """
 
 
 def install_post_commit_hook(repo_path: str | Path, repo_name: str) -> Path:
     """Write `.git/hooks/post-commit` for delta ingest. Returns the path
     written. Raises FileNotFoundError if .git/hooks doesn't exist."""
+    return _install_hook(
+        repo_path, repo_name,
+        hook_name="post-commit", template=_POST_COMMIT_TEMPLATE,
+    )
+
+
+def install_post_merge_hook(repo_path: str | Path, repo_name: str) -> Path:
+    """Write `.git/hooks/post-merge` so external `git pull` triggers
+    delta ingest. Mirrors install_post_commit_hook."""
+    return _install_hook(
+        repo_path, repo_name,
+        hook_name="post-merge", template=_POST_MERGE_TEMPLATE,
+    )
+
+
+def _install_hook(
+    repo_path: str | Path, repo_name: str, *, hook_name: str, template: str,
+) -> Path:
     repo_path = Path(repo_path).resolve()
     hook_dir = repo_path / ".git" / "hooks"
     if not hook_dir.is_dir():
         raise FileNotFoundError(f"not a git checkout: {repo_path}")
-    hook = hook_dir / "post-commit"
-    hook.write_text(_POST_COMMIT_TEMPLATE.format(
+    hook = hook_dir / hook_name
+    # Safety: if hook is a symlink (often pointing at a SHARED script
+    # in an external project, e.g. AIForgeCrew's aiforge-reindex.sh),
+    # writing through it would clobber the shared file for every other
+    # repo using the same symlink. Unlink first, then write a fresh
+    # standalone hook.
+    if hook.is_symlink():
+        hook.unlink()
+    hook.write_text(template.format(
         repo_name=repo_name, repo_path=str(repo_path),
     ))
     hook.chmod(0o755)

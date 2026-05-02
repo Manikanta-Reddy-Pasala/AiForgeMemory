@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 from aiforge_memory.ingest import delta
 
-
 # ─── hash diff ────────────────────────────────────────────────────────
 
 def test_diff_hashes_classifies_changes() -> None:

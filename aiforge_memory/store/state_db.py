@@ -24,9 +24,14 @@ DEFAULT_DB_PATH = Path(
 
 
 def open_db(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
+    """Open the state DB. Allows cross-thread use because the scheduler
+    daemon's per-tick worker thread (used to enforce the timeout) needs
+    to call into state_db while the connection was opened on the main
+    thread. Ticks run serially in the loop, so there is at most one
+    writer at any instant — no extra locking required."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn

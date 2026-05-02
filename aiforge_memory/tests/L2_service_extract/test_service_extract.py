@@ -10,7 +10,6 @@ import pytest
 
 from aiforge_memory.ingest import service_extract as se
 
-
 FIX = Path(__file__).parent / "fixtures"
 MULTI_REPO = FIX / "multi_repo"
 

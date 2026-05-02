@@ -8,7 +8,6 @@ from aiforge_memory.ingest import flow
 from aiforge_memory.ingest.repo_summary import RepoSummary
 from aiforge_memory.store import state_db as sdb
 
-
 FIX = Path(__file__).parent / "fixtures"
 
 

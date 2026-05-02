@@ -5,9 +5,9 @@ import os
 
 import pytest
 
-from aiforge_memory.ingest.service_extract import ServiceDraft
 from aiforge_memory.ingest.repo_summary import RepoSummary
-from aiforge_memory.store import schema, service_writer, repo_writer
+from aiforge_memory.ingest.service_extract import ServiceDraft
+from aiforge_memory.store import repo_writer, schema, service_writer
 
 pytestmark = pytest.mark.live_neo4j
 

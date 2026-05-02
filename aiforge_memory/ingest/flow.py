@@ -21,12 +21,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from aiforge_memory.ingest import (
-    edges, embed, file_summary, pack_repo, repo_summary, service_extract,
+    edges,
+    embed,
+    file_summary,
+    git_meta,
+    pack_repo,
+    repo_summary,
+    service_extract,
     treesitter_walk,
 )
 from aiforge_memory.store import (
-    chunk_writer, file_summary_writer, repo_writer, service_writer,
-    state_db as sdb, symbol_writer,
+    chunk_writer,
+    file_summary_writer,
+    repo_writer,
+    service_writer,
+    symbol_writer,
+)
+from aiforge_memory.store import (
+    state_db as sdb,
 )
 
 
@@ -57,20 +69,23 @@ def ingest_repo(
     skip_symbols: bool = False,
     skip_summaries: bool = False,
     skip_chunks: bool = False,
+    use_lsp: bool = False,
 ) -> IngestResult:
     text, sha = pack_repo.pack(repo_path)
     prev = sdb.get_repo_pack_sha(state_conn, repo=repo_name)
     if prev == sha and not force:
         return IngestResult(status="skipped_unchanged", pack_sha=sha, repo=repo_name)
 
-    # Stage 2 — repo summary + Repo node
+    # Stage 2 — repo summary + Repo node (with git metadata)
     summary = repo_summary.summarize(text, repo_name=repo_name)
+    gmeta = git_meta.read(repo_path)
     repo_writer.upsert_repo(
         driver,
         name=repo_name,
         path=str(Path(repo_path).resolve()),
         summary=summary,
         pack_sha=sha,
+        git_meta=gmeta,
     )
 
     # Stage 3 — services
@@ -101,6 +116,18 @@ def ingest_repo(
         call_edges = edges.resolve_calls_with_source(
             walked, repo=repo_name, repo_root=repo_path,
         )
+        # Optional LSP pass — adds high-confidence (1.0) edges that the
+        # tree-sitter heuristic missed. Merged via _merge_calls so the
+        # higher confidence wins on duplicate (caller, callee) pairs.
+        if use_lsp:
+            try:
+                from aiforge_memory.ingest.lsp import resolve_calls as lsp_resolve
+                lsp_edges = lsp_resolve(
+                    walked, repo=repo_name, repo_root=repo_path,
+                )
+                call_edges = _merge_calls(call_edges, lsp_edges)
+            except Exception:  # noqa: BLE001 — LSP is best-effort
+                pass
         ccounts = symbol_writer.upsert_call_edges(
             driver, repo=repo_name, edges=call_edges,
             file_paths=[wf.path for wf in walked],
@@ -132,6 +159,22 @@ def ingest_repo(
             chunks_count = ccounts["chunks"]
 
     sdb.set_repo_pack_sha(state_conn, repo=repo_name, pack_sha=sha)
+    # Persist per-file hashes + git head so subsequent --delta runs have
+    # state to diff against. Without this, delta hits cold_start every time.
+    if walked:
+        sdb.upsert_file_hashes(
+            state_conn, repo=repo_name,
+            hashes={wf.path: wf.hash for wf in walked},
+        )
+    try:
+        gmeta = git_meta.read(repo_path)
+        if gmeta.head_sha:
+            sdb.set_repo_git_head(
+                state_conn, repo=repo_name,
+                head_sha=gmeta.head_sha, branch=gmeta.branch,
+            )
+    except Exception:  # noqa: BLE001 — best-effort
+        pass
     return IngestResult(
         status="indexed", pack_sha=sha, repo=repo_name,
         services_count=services_count,
@@ -144,3 +187,16 @@ def ingest_repo(
         summaries_skipped=summaries_skipped,
         chunks_count=chunks_count,
     )
+
+
+def _merge_calls(primary, secondary):
+    """Merge two CallEdge lists keyed on (caller, callee). Higher
+    confidence wins. Used to layer LSP-confirmed edges on top of the
+    tree-sitter heuristic without duplicating rows."""
+    by_key: dict[tuple[str, str], object] = {}
+    for e in list(primary) + list(secondary):
+        key = (e.caller_fqname, e.callee_fqname)
+        existing = by_key.get(key)
+        if existing is None or e.confidence > existing.confidence:
+            by_key[key] = e
+    return list(by_key.values())

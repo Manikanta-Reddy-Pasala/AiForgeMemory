@@ -7,7 +7,6 @@ from unittest.mock import patch
 from aiforge_memory.ingest import embed as em
 from aiforge_memory.ingest.treesitter_walk import WalkedFile, WalkedSymbol
 
-
 FIX = Path(__file__).parent.parent / "L4_symbols" / "fixtures" / "poly_repo"
 
 

@@ -12,7 +12,6 @@ from __future__ import annotations
 from aiforge_memory.ingest.edges import CallEdge
 from aiforge_memory.ingest.treesitter_walk import WalkedFile
 
-
 _UPSERT_FILE = """
 MERGE (f:File_v2 {repo: $repo, path: $path})
 SET f.hash         = $hash,
@@ -31,6 +30,11 @@ SET s.kind            = $kind,
     s.doc_first_line  = $doc_first_line,
     s.line_start      = $line_start,
     s.line_end        = $line_end,
+    s.visibility      = $visibility,
+    s.modifiers       = $modifiers,
+    s.return_type     = $return_type,
+    s.params_json     = $params_json,
+    s.deprecated      = $deprecated,
     s.schema_version  = 'codemem-v1'
 WITH s
 MATCH (f:File_v2 {repo: $repo, path: $file_path})
@@ -100,6 +104,11 @@ def upsert_files_and_symbols(
                     file_path=sym.file_path, signature=sym.signature,
                     doc_first_line=sym.doc_first_line,
                     line_start=sym.line_start, line_end=sym.line_end,
+                    visibility=getattr(sym, "visibility", "") or "",
+                    modifiers=list(getattr(sym, "modifiers", []) or []),
+                    return_type=getattr(sym, "return_type", "") or "",
+                    params_json=getattr(sym, "params_json", "") or "",
+                    deprecated=bool(getattr(sym, "deprecated", False)),
                 ).consume()
                 counts["symbols"] += 1
 

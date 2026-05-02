@@ -15,8 +15,8 @@ import pytest
 
 from aiforge_memory.ingest import flow
 from aiforge_memory.ingest.repo_summary import RepoSummary
-from aiforge_memory.store import schema, state_db as sdb
-
+from aiforge_memory.store import schema
+from aiforge_memory.store import state_db as sdb
 
 HERE = Path(__file__).parent
 FIX = HERE / "fixtures"

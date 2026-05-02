@@ -32,7 +32,6 @@ from dataclasses import dataclass, field
 
 from aiforge_memory.store import link_writer
 
-
 # ─── Regex catalog ────────────────────────────────────────────────────
 # Keep patterns conservative — false positives pollute the graph.
 

@@ -26,7 +26,6 @@ from pathlib import Path
 from tree_sitter import Query, QueryCursor
 from tree_sitter_language_pack import get_language, get_parser
 
-
 # Mapping file extension → tree-sitter language id
 _EXT_LANG: dict[str, str] = {
     ".py": "python",
@@ -80,6 +79,12 @@ class WalkedSymbol:
     doc_first_line: str = ""
     line_start: int = 0
     line_end: int = 0
+    # Enrichment (best-effort; empty when language adapter can't infer)
+    visibility: str = ""    # public | private | protected | package
+    modifiers: list[str] = field(default_factory=list)
+    return_type: str = ""
+    params_json: str = ""   # JSON-encoded list[{"name", "type"}]
+    deprecated: bool = False
 
 
 @dataclass
@@ -303,7 +308,7 @@ def _make_symbol(
     sig_line = source.split(b"\n")[node.start_point[0]].decode(
         "utf-8", errors="replace"
     ).strip()
-    return WalkedSymbol(
+    sym = WalkedSymbol(
         fqname=fqname or _fqname(wf.path, name),
         kind=kind,
         file_path=wf.path,
@@ -312,6 +317,197 @@ def _make_symbol(
         line_start=node.start_point[0] + 1,
         line_end=node.end_point[0] + 1,
     )
+    try:
+        _enrich_symbol(sym, node=node, source=source, lang=wf.lang)
+    except Exception:  # noqa: BLE001 — enrichment is best-effort
+        pass
+    return sym
+
+
+# ─── Symbol enrichment ────────────────────────────────────────────────
+# Walks the def-node's children to extract visibility, modifiers, return
+# type, parameters, and @Deprecated / @deprecated. Per-language rules
+# kept narrow: when in doubt, leave the field empty rather than guess.
+
+_JAVA_VISIBILITY = {"public", "private", "protected"}
+_JAVA_MODIFIERS = {
+    "static", "final", "abstract", "synchronized", "native",
+    "transient", "volatile", "default", "strictfp",
+}
+
+
+def _enrich_symbol(sym: WalkedSymbol, *, node, source: bytes, lang: str) -> None:
+    if lang == "java":
+        _enrich_java(sym, node=node, source=source)
+    elif lang == "python":
+        _enrich_python(sym, node=node, source=source)
+    elif lang in ("typescript", "tsx", "javascript"):
+        _enrich_ts(sym, node=node, source=source)
+
+
+def _enrich_java(sym: WalkedSymbol, *, node, source: bytes) -> None:
+    """For class/interface/method/field/constructor nodes: read the
+    `modifiers` child if present, plus `type` (return) and
+    `formal_parameters` for method-like nodes."""
+    import json as _json
+
+    modifiers_node = _child_by_field(node, "modifiers") or _first_child_of_type(
+        node, "modifiers"
+    )
+    if modifiers_node is not None:
+        seen_vis: list[str] = []
+        mods: list[str] = []
+        for child in _walk_children(modifiers_node):
+            ttype = child.type
+            text = _text(child, source)
+            if ttype == "marker_annotation" or ttype == "annotation":
+                if "Deprecated" in text:
+                    sym.deprecated = True
+                continue
+            if text in _JAVA_VISIBILITY:
+                seen_vis.append(text)
+            elif text in _JAVA_MODIFIERS:
+                mods.append(text)
+        if seen_vis:
+            sym.visibility = seen_vis[0]
+        else:
+            sym.visibility = "package"  # Java default
+        sym.modifiers = mods
+
+    if sym.kind in ("method",):
+        rt = _child_by_field(node, "type")
+        if rt is not None:
+            sym.return_type = _text(rt, source).strip()
+        params = _child_by_field(node, "parameters")
+        if params is not None:
+            out: list[dict] = []
+            for child in _walk_children(params):
+                if child.type == "formal_parameter":
+                    pname = _child_by_field(child, "name")
+                    ptype = _child_by_field(child, "type")
+                    out.append({
+                        "name": _text(pname, source) if pname else "",
+                        "type": _text(ptype, source) if ptype else "",
+                    })
+            if out:
+                sym.params_json = _json.dumps(out, separators=(",", ":"))
+
+
+def _enrich_python(sym: WalkedSymbol, *, node, source: bytes) -> None:
+    """Python: visibility derived from name (`_x` private convention),
+    return-type annotation, parameters with type hints, @deprecated."""
+    import json as _json
+
+    # Name-based visibility convention
+    name = sym.fqname.rsplit("::", 1)[-1]
+    if name.startswith("__") and not name.endswith("__"):
+        sym.visibility = "private"
+    elif name.startswith("_"):
+        sym.visibility = "protected"
+    else:
+        sym.visibility = "public"
+
+    # Decorator inspection — walk parent's decorated_definition if any
+    parent = node.parent
+    if parent is not None and parent.type == "decorated_definition":
+        for child in _walk_children(parent):
+            if child.type == "decorator" and "deprecated" in _text(
+                child, source
+            ).lower():
+                sym.deprecated = True
+
+    if sym.kind in ("method", "function"):
+        rt = _child_by_field(node, "return_type")
+        if rt is not None:
+            sym.return_type = _text(rt, source).strip()
+        params = _child_by_field(node, "parameters")
+        if params is not None:
+            out: list[dict] = []
+            for child in _walk_children(params):
+                pname, ptype = _python_param(child, source)
+                if pname:
+                    out.append({"name": pname, "type": ptype})
+            if out:
+                sym.params_json = _json.dumps(out, separators=(",", ":"))
+
+
+def _python_param(child, source: bytes) -> tuple[str, str]:
+    """Best-effort: extract (name, type) from one Python parameter node.
+    Handles `identifier`, `typed_parameter`, `default_parameter`,
+    `typed_default_parameter`, and `(*args, **kwargs)`."""
+    ttype = child.type
+    if ttype == "identifier":
+        return _text(child, source), ""
+    if ttype == "typed_parameter":
+        # First identifier child = name; field "type" = annotation.
+        ident = _first_child_of_type(child, "identifier")
+        type_node = _child_by_field(child, "type")
+        if ident is None:
+            return "", ""
+        return (
+            _text(ident, source),
+            _text(type_node, source) if type_node else "",
+        )
+    if ttype in ("default_parameter", "typed_default_parameter"):
+        # Field "name" works for default_parameter; for the typed
+        # variant we descend into the typed_parameter sub-tree.
+        name_node = _child_by_field(child, "name")
+        if name_node is not None:
+            type_node = _child_by_field(child, "type")
+            return (
+                _text(name_node, source),
+                _text(type_node, source) if type_node else "",
+            )
+        # typed_default_parameter: first child is the typed_parameter
+        for sub in _walk_children(child):
+            if sub.type == "typed_parameter":
+                return _python_param(sub, source)
+    if ttype in ("list_splat_pattern", "dictionary_splat_pattern"):
+        ident = _first_child_of_type(child, "identifier")
+        prefix = "*" if ttype == "list_splat_pattern" else "**"
+        return (prefix + _text(ident, source) if ident else "", "")
+    return "", ""
+
+
+def _enrich_ts(sym: WalkedSymbol, *, node, source: bytes) -> None:
+    """TS/JS: best-effort visibility from `accessibility_modifier`,
+    `static` modifier from `readonly`/`static` siblings, return type
+    when annotated. Anonymous + arrow functions are skipped — their
+    metadata lives at the assignment site, not on the function node."""
+    # accessibility_modifier appears as a child of class members
+    for child in _walk_children(node):
+        if child.type == "accessibility_modifier":
+            sym.visibility = _text(child, source).strip()
+        elif child.type == "static":
+            sym.modifiers.append("static")
+    if not sym.visibility:
+        sym.visibility = "public"
+    rt = _child_by_field(node, "return_type")
+    if rt is not None:
+        sym.return_type = _text(rt, source).strip().lstrip(":").strip()
+
+
+# ─── tree-sitter node helpers ─────────────────────────────────────────
+
+def _child_by_field(node, field_name: str):
+    """Return node's named child for `field_name`, or None."""
+    try:
+        return node.child_by_field_name(field_name)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _first_child_of_type(node, type_name: str):
+    for child in _walk_children(node):
+        if child.type == type_name:
+            return child
+    return None
+
+
+def _walk_children(node):
+    """Yield direct named + anonymous children. Avoids cursor allocations."""
+    for i in range(node.child_count):
+        yield node.child(i)
 
 
 def _text(node, source: bytes) -> str:

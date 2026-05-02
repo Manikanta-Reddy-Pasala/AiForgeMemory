@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aiforge_memory.ingest import edges, treesitter_walk as tsw
-
+from aiforge_memory.ingest import edges
+from aiforge_memory.ingest import treesitter_walk as tsw
 
 FIX = Path(__file__).parent / "fixtures" / "poly_repo"
 

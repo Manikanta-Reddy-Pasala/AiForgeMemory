@@ -66,18 +66,30 @@ def test_explicit_name_overrides_yaml(tmp_path: Path) -> None:
     assert cfg.name == "explicit"
 
 
-def test_apply_to_env(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.delenv("AIFORGE_NEO4J_URI", raising=False)
-    cfg = RepoConfig(
-        name="x", path=str(tmp_path),
-        llm_url="http://test:1234/v1",
-        embed_url="http://test:8764",
-        neo4j_uri="bolt://test:7687",
-    )
-    cfg.apply_to_env()
-    assert os.environ["AIFORGE_CODEMEM_LM_URL"] == "http://test:1234/v1"
-    assert os.environ["AIFORGE_EMBED_URL"] == "http://test:8764"
-    assert os.environ["AIFORGE_NEO4J_URI"] == "bolt://test:7687"
+def test_apply_to_env(tmp_path: Path) -> None:
+    # Snapshot AIFORGE_* env keys, then restore in a finally so this
+    # test's apply_to_env() side-effects never leak into the rest of
+    # the pytest session (notably the live Neo4j tests).
+    aiforge_keys = [k for k in os.environ if k.startswith("AIFORGE_")]
+    snapshot = {k: os.environ[k] for k in aiforge_keys}
+    for k in aiforge_keys:
+        del os.environ[k]
+    try:
+        cfg = RepoConfig(
+            name="x", path=str(tmp_path),
+            llm_url="http://test:1234/v1",
+            embed_url="http://test:8764",
+            neo4j_uri="bolt://test:7687",
+        )
+        cfg.apply_to_env()
+        assert os.environ["AIFORGE_CODEMEM_LM_URL"] == "http://test:1234/v1"
+        assert os.environ["AIFORGE_EMBED_URL"] == "http://test:8764"
+        assert os.environ["AIFORGE_NEO4J_URI"] == "bolt://test:7687"
+    finally:
+        # Strip everything cfg.apply_to_env() set, then restore snapshot.
+        for k in [k for k in os.environ if k.startswith("AIFORGE_")]:
+            del os.environ[k]
+        os.environ.update(snapshot)
 
 
 def test_env_var_fallback(tmp_path: Path, monkeypatch) -> None:

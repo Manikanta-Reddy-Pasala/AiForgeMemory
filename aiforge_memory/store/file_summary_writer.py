@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from aiforge_memory.ingest.file_summary import FileSummary
 
-
 _UPDATE_FILE = """
 MATCH (f:File_v2 {repo: $repo, path: $path})
 SET f.summary       = $summary,
