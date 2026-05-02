@@ -222,6 +222,9 @@ def _call_llm(
         + (f"Doc: {doc}\n" if doc else "")
         + f"\nBody:\n{body}\n"
     )
+    # mlx-lm 0.31 rejects response_format=json_object with conn-reset.
+    # Drop it; the parser is already fence-tolerant + balanced-brace
+    # fallback, which covers what local models actually emit.
     resp = client.chat.completions.create(
         model=DEFAULT_MODEL,
         messages=[
@@ -230,6 +233,5 @@ def _call_llm(
         ],
         temperature=0.0,
         max_tokens=120,
-        response_format={"type": "json_object"},
     )
     return resp.choices[0].message.content or ""
