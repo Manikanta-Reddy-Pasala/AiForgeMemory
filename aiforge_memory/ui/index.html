@@ -4,57 +4,81 @@
   <meta charset="utf-8">
   <title>AiForgeMemory</title>
   <style>
+    /* Light mode — palette aligned with AiForgeCrew design tokens. */
     :root {
-      --bg: #0e1116; --fg: #d8dee9; --muted: #6e7889; --accent: #88c0d0;
-      --good: #a3be8c; --bad: #bf616a; --warn: #ebcb8b;
-      --card: #161b22; --border: #30363d; --hover: #1f242c;
-      --code-bg: #0a0d12;
+      --bg: #f4f6f9;          /* page background, deepest */
+      --card: #ffffff;        /* app shell + panels */
+      --hover: #f3f5f8;       /* hover / selected */
+      --code-bg: #f6f8fa;     /* code blocks + inputs */
+      --fg: #1d2332;          /* primary text */
+      --muted: #5f6878;       /* secondary text */
+      --border: #d9dee6;      /* visible borders on white */
+      --accent: #1f6feb;      /* AiForge blue */
+      --accent-soft: rgba(31,111,235,.10);
+      --good: #198754;
+      --good-soft: rgba(25,135,84,.12);
+      --bad:  #d1242f;
+      --bad-soft:  rgba(209,36,47,.10);
+      --warn: #c7851a;
+      --warn-soft: rgba(199,133,26,.14);
+      /* Badge tints — soft pastels that read on white */
+      --bdg-method:    rgba(31,111,235,.10);
+      --bdg-method-fg: #0d5de0;
+      --bdg-class:     rgba(155,89,182,.12);
+      --bdg-class-fg:  #6f42c1;
+      --bdg-field:     rgba(199,133,26,.14);
+      --bdg-field-fg:  #8b5a05;
+      --bdg-iface:     rgba(25,135,84,.12);
+      --bdg-iface-fg:  #146c43;
     }
     * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Monaco, monospace; background: var(--bg); color: var(--fg); font-size: 13px; }
+    html, body { margin: 0; height: 100%; font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--fg); font-size: 13px; }
     body { display: grid; grid-template-rows: auto 1fr; }
-    header { padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--card); display: flex; align-items: center; gap: 16px; }
+    header { padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--card); display: flex; align-items: center; gap: 16px; box-shadow: 0 1px 2px rgba(31,40,64,.06); }
     header h1 { margin: 0; font-size: 14px; font-weight: 600; color: var(--accent); }
     header .health { display: flex; gap: 8px; font-size: 11px; }
-    header .health .pill { padding: 2px 8px; border-radius: 10px; background: #2a2f3a; }
-    header .health .ok { background: #2a4a32; color: var(--good); }
-    header .health .bad { background: #4a2a32; color: var(--bad); }
+    header .health .pill { padding: 2px 8px; border-radius: 10px; background: var(--hover); color: var(--muted); }
+    header .health .ok { background: var(--good-soft); color: var(--good); }
+    header .health .bad { background: var(--bad-soft); color: var(--bad); }
     main { display: grid; grid-template-columns: 280px 1fr; overflow: hidden; }
     aside { border-right: 1px solid var(--border); overflow-y: auto; padding: 12px; background: var(--card); }
-    .pane { padding: 16px; overflow-y: auto; }
+    .pane { padding: 16px; overflow-y: auto; background: var(--bg); }
     h2 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: 1px; }
     .repo-row { padding: 6px 8px; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
     .repo-row:hover { background: var(--hover); }
-    .repo-row.active { background: var(--hover); color: var(--accent); }
+    .repo-row.active { background: var(--accent-soft); color: var(--accent); }
     .repo-row .name { font-weight: 600; }
     .repo-row .meta { font-size: 10px; color: var(--muted); }
     .search-row { display: flex; gap: 8px; margin-bottom: 16px; }
-    .search-row input[type=text] { flex: 1; padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--code-bg); color: var(--fg); font-family: inherit; font-size: 13px; }
-    .search-row select, .search-row button { padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--code-bg); color: var(--fg); font-family: inherit; font-size: 13px; cursor: pointer; }
-    .search-row button { background: var(--accent); color: #000; font-weight: 600; }
+    .search-row input[type=text] { flex: 1; padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--card); color: var(--fg); font-family: inherit; font-size: 13px; }
+    .search-row input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .search-row select { padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--card); color: var(--fg); font-family: inherit; font-size: 13px; cursor: pointer; }
+    .search-row button { padding: 8px 16px; border: 1px solid var(--accent); border-radius: 4px; background: var(--accent); color: #ffffff; font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .search-row button:hover { background: #0d5de0; border-color: #0d5de0; }
     .search-row button:disabled { opacity: 0.5; cursor: wait; }
     .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
-    .tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; }
+    .tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--muted); }
+    .tab:hover { color: var(--fg); }
     .tab.active { border-bottom-color: var(--accent); color: var(--accent); }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-bottom: 8px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 8px; box-shadow: 0 1px 2px rgba(31,40,64,.04); }
     .card .path { color: var(--accent); font-weight: 600; }
     .card .summary { color: var(--muted); margin-top: 4px; font-size: 12px; }
     .meta-grid { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; font-size: 12px; }
     .meta-grid .k { color: var(--muted); }
-    pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 12px; overflow-x: auto; font-size: 12px; line-height: 1.5; }
-    .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; background: #2a2f3a; font-size: 10px; margin-right: 4px; }
-    .badge.method { background: #2a3f4a; color: var(--accent); }
-    .badge.class { background: #3a2a4a; color: #c5a3d8; }
-    .badge.field { background: #4a3a2a; color: var(--warn); }
-    .badge.interface { background: #2a4a3a; color: var(--good); }
+    pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 12px; overflow-x: auto; font-size: 12px; line-height: 1.5; font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace; }
+    .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; background: var(--hover); color: var(--muted); font-size: 10px; margin-right: 4px; }
+    .badge.method    { background: var(--bdg-method); color: var(--bdg-method-fg); }
+    .badge.class     { background: var(--bdg-class);  color: var(--bdg-class-fg); }
+    .badge.field     { background: var(--bdg-field);  color: var(--bdg-field-fg); }
+    .badge.interface { background: var(--bdg-iface);  color: var(--bdg-iface-fg); }
     .err { color: var(--bad); font-size: 11px; }
     .empty { color: var(--muted); padding: 24px; text-align: center; }
     .latency { color: var(--muted); font-size: 11px; margin-left: 8px; }
     a { color: var(--accent); text-decoration: none; cursor: pointer; }
     a:hover { text-decoration: underline; }
-    .file-link { font-family: inherit; font-size: 12px; word-break: break-all; }
+    .file-link { font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; font-size: 12px; word-break: break-all; }
     .scheduler-row { padding: 4px 0; font-size: 11px; border-bottom: 1px dotted var(--border); display: flex; gap: 8px; }
-    .status-ok { color: var(--good); }
+    .status-ok  { color: var(--good); }
     .status-bad { color: var(--bad); }
     .status-meh { color: var(--warn); }
   </style>
