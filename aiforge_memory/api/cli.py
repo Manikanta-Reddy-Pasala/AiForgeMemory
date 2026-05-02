@@ -386,8 +386,11 @@ def _cmd_schedule_add(args: argparse.Namespace) -> int:
         path=str(Path(args.path or os.getcwd()).resolve()),
         interval_seconds=args.interval,
         pull=not args.no_pull,
+        skip_services=args.skip_services,
         skip_summaries=args.skip_summaries,
         skip_chunks=args.skip_chunks,
+        use_lsp=args.use_lsp,
+        timeout_seconds=args.timeout,
     )
     scheduler.add_repo(rs)
     print(json.dumps({"added": rs.__dict__,
@@ -589,8 +592,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="poll interval in seconds (default 600)")
     sc_add.add_argument("--no-pull", action="store_true",
                         help="fetch only — do not run git pull --ff-only")
+    sc_add.add_argument("--skip-services", action="store_true",
+                        help="skip Stage 3 LLM service extraction "
+                             "(useful for doc/note dirs with no services)")
     sc_add.add_argument("--skip-summaries", action="store_true")
     sc_add.add_argument("--skip-chunks", action="store_true")
+    sc_add.add_argument("--use-lsp", action="store_true",
+                        help="layer LSP-confirmed CALLS on top of tree-sitter")
+    sc_add.add_argument("--timeout", type=int, default=1800,
+                        help="per-tick wall ceiling in seconds (default 1800)")
     sc_add.set_defaults(func=_cmd_schedule_add)
 
     sc_rm = sc_sub.add_parser("remove", help="Remove a repo from the schedule")

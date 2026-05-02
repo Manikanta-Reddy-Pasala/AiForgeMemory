@@ -76,6 +76,7 @@ class RepoSchedule:
     path: str
     interval_seconds: int = 600
     pull: bool = True
+    skip_services: bool = False    # skip Stage 3 (LLM service catalog)
     skip_summaries: bool = False
     skip_chunks: bool = False
     use_lsp: bool = False          # opt-in LSP-confirmed CALLS
@@ -104,6 +105,7 @@ class SchedulerConfig:
                     path=str(r["path"]),
                     interval_seconds=int(r.get("interval_seconds", 600)),
                     pull=bool(r.get("pull", True)),
+                    skip_services=bool(r.get("skip_services", False)),
                     skip_summaries=bool(r.get("skip_summaries", False)),
                     skip_chunks=bool(r.get("skip_chunks", False)),
                     use_lsp=bool(r.get("use_lsp", False)),
@@ -322,6 +324,7 @@ def tick_repo(
                 res = flow.ingest_repo(
                     repo_name=rs.name, repo_path=rs.path,
                     driver=driver, state_conn=state_conn, force=False,
+                    skip_services=rs.skip_services,
                     skip_summaries=rs.skip_summaries,
                     skip_chunks=rs.skip_chunks,
                     use_lsp=rs.use_lsp,
