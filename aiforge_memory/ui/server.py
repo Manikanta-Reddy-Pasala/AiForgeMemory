@@ -111,12 +111,15 @@ def build_app():
                 for k, v in list(meta.items()):
                     if hasattr(v, "iso_format"):
                         meta[k] = str(v)
+                # NULLS LAST is Cypher 25-only; older Neo4j (<5.27) refuses.
+                # Coerce nulls to a fixed-old datetime via coalesce so the
+                # sort works on every supported version.
                 files = [dict(r) for r in s.run("""
                     MATCH (f:File_v2 {repo:$n})
                     RETURN f.path AS path, f.lang AS lang, f.lines AS lines,
                            coalesce(f.summary,'') AS summary,
                            toString(f.indexed_at) AS indexed
-                    ORDER BY f.indexed_at DESC NULLS LAST, f.path
+                    ORDER BY coalesce(f.indexed_at, datetime('1970-01-01T00:00:00Z')) DESC, f.path
                     LIMIT 200
                 """, n=name)]
                 services = [dict(r) for r in s.run("""

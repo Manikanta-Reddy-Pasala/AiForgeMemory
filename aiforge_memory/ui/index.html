@@ -81,6 +81,16 @@
     .status-ok  { color: var(--good); }
     .status-bad { color: var(--bad); }
     .status-meh { color: var(--warn); }
+    /* Spinner — used while async views load */
+    .spinner-wrap { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 32px; color: var(--muted); font-size: 12px; }
+    .spinner { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .memory-filter { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+    .memory-filter label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .memory-filter select { padding: 6px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--card); color: var(--fg); font-size: 12px; cursor: pointer; }
+    .memory-counts { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .memory-counts .pill-count { padding: 4px 10px; border-radius: 12px; background: var(--hover); font-size: 11px; color: var(--muted); }
+    .memory-counts .pill-count strong { color: var(--fg); }
   </style>
 </head>
 <body>
@@ -124,6 +134,10 @@ async function api(path, opts={}) {
   const r = await fetch(path, opts);
   if (!r.ok) throw new Error(`${path}: ${r.status}`);
   return r.json();
+}
+
+function spinner(label) {
+  return `<div class="spinner-wrap"><div class="spinner"></div><span>${esc(label || 'loading…')}</span></div>`;
 }
 
 async function loadRepos() {
@@ -195,7 +209,7 @@ async function search() {
   const btn = $('#searchBtn');
   btn.disabled = true; btn.textContent = '…';
   setView('search');
-  $('#view').innerHTML = `<div class="empty">searching ${esc(repo)} · this can take 10–25s with live LLM grounding</div>`;
+  $('#view').innerHTML = spinner(`searching ${repo} — 10–25s with live LLM grounding`);
   const t0 = performance.now();
   try {
     const r = await api('/api/search', {
@@ -240,7 +254,7 @@ function renderSearchResults(r, ms) {
 
 async function loadRepoView() {
   if (!activeRepo) { $('#view').innerHTML = `<div class="empty">Click a repo on the left.</div>`; return; }
-  $('#view').innerHTML = `<div class="empty">loading ${esc(activeRepo)}…</div>`;
+  $('#view').innerHTML = spinner(`loading ${activeRepo}`);
   try {
     const r = await api(`/api/repo/${encodeURIComponent(activeRepo)}`);
     let out = `<h2>${esc(activeRepo)}</h2>`;
@@ -271,7 +285,7 @@ async function loadRepoView() {
 }
 
 async function openFile(repo, path) {
-  $('#view').innerHTML = `<div class="empty">loading ${esc(path)}…</div>`;
+  $('#view').innerHTML = spinner(`loading ${path}`);
   try {
     const r = await api(`/api/file?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(path)}`);
     let out = `<h2>${esc(path)}</h2>`;
@@ -303,28 +317,79 @@ async function openFile(repo, path) {
   }
 }
 
+let memoryFilter = '';   // '' | 'decision' | 'observation' | 'note' | 'doc'
+
 async function loadMemoryView() {
   if (!activeRepo) { $('#view').innerHTML = `<div class="empty">Pick a repo first.</div>`; return; }
-  $('#view').innerHTML = `<div class="empty">loading memory for ${esc(activeRepo)}…</div>`;
+  $('#view').innerHTML = spinner(`loading memory for ${activeRepo}`);
   try {
-    const rows = await api(`/api/memory?repo=${encodeURIComponent(activeRepo)}&limit=200`);
-    if (!rows.length) { $('#view').innerHTML = `<div class="empty">No memory nodes for ${esc(activeRepo)}.</div>`; return; }
-    $('#view').innerHTML = `<h2>Memory (${rows.length})</h2>` + rows.map(r => `
-      <div class="card">
-        <span class="badge">${esc(r.label)}</span>
-        ${r.kind ? `<span class="badge">${esc(r.kind)}</span>` : ''}
-        <strong>${esc(r.title || '(no title)')}</strong>
-        <span class="latency">${esc(r.created_at || '')}</span>
-        <div class="summary">${esc((r.text || '').slice(0, 400))}</div>
-        <code class="latency">${esc(r.id)}</code>
-      </div>`).join('');
+    // Fetch all + per-type counts in parallel.
+    const [all, dec, obs, note, doc] = await Promise.all([
+      api(`/api/memory?repo=${encodeURIComponent(activeRepo)}&limit=500`),
+      api(`/api/memory?repo=${encodeURIComponent(activeRepo)}&type=decision&limit=1`),
+      api(`/api/memory?repo=${encodeURIComponent(activeRepo)}&type=observation&limit=1`),
+      api(`/api/memory?repo=${encodeURIComponent(activeRepo)}&type=note&limit=1`),
+      api(`/api/memory?repo=${encodeURIComponent(activeRepo)}&type=doc&limit=1`),
+    ]);
+    // We can't get "count" cheaply from the API (it returns rows), so
+    // fall back to counting by label in `all`. Per-type fetches above
+    // just confirm the endpoint works for each label.
+    const counts = { decision: 0, observation: 0, note: 0, doc: 0 };
+    for (const r of all) {
+      const k = (r.label || '').toLowerCase().replace('_v2','');
+      if (k in counts) counts[k]++;
+    }
+    const rows = memoryFilter
+      ? all.filter(r => (r.label || '').toLowerCase().replace('_v2','') === memoryFilter)
+      : all;
+
+    let header = `<h2>Memory · ${esc(activeRepo)}</h2>`;
+    header += `<div class="memory-counts">`
+      + `<span class="pill-count">decisions <strong>${counts.decision}</strong></span>`
+      + `<span class="pill-count">observations <strong>${counts.observation}</strong></span>`
+      + `<span class="pill-count">notes <strong>${counts.note}</strong></span>`
+      + `<span class="pill-count">docs <strong>${counts.doc}</strong></span>`
+      + `</div>`;
+    header += `<div class="memory-filter">`
+      + `<label for="memTypeSel">filter</label>`
+      + `<select id="memTypeSel">`
+      + `<option value="">all</option>`
+      + `<option value="decision"${memoryFilter==='decision'?' selected':''}>decisions</option>`
+      + `<option value="observation"${memoryFilter==='observation'?' selected':''}>observations</option>`
+      + `<option value="note"${memoryFilter==='note'?' selected':''}>notes</option>`
+      + `<option value="doc"${memoryFilter==='doc'?' selected':''}>docs</option>`
+      + `</select>`
+      + `</div>`;
+
+    if (!rows.length) {
+      const reason = all.length === 0
+        ? `No memory nodes recorded yet. They get written by the agent pipeline (Decision/Observation/Note/Doc) and via <code>aiforge-memory record</code>.`
+        : `No <strong>${esc(memoryFilter)}</strong> entries for ${esc(activeRepo)}.`;
+      $('#view').innerHTML = header + `<div class="empty">${reason}</div>`;
+    } else {
+      $('#view').innerHTML = header + rows.map(r => `
+        <div class="card">
+          <span class="badge">${esc(r.label)}</span>
+          ${r.kind ? `<span class="badge">${esc(r.kind)}</span>` : ''}
+          <strong>${esc(r.title || '(no title)')}</strong>
+          <span class="latency">${esc(r.created_at || '')}</span>
+          <div class="summary">${esc((r.text || '').slice(0, 400))}</div>
+          <code class="latency">${esc(r.id)}</code>
+        </div>`).join('');
+    }
+    // Wire filter dropdown — re-render in place on change.
+    const sel = $('#memTypeSel');
+    if (sel) sel.addEventListener('change', e => {
+      memoryFilter = e.target.value;
+      loadMemoryView();
+    });
   } catch (e) {
     $('#view').innerHTML = `<div class="err">${esc(e.message)}</div>`;
   }
 }
 
 async function loadLinksView() {
-  $('#view').innerHTML = `<div class="empty">loading…</div>`;
+  $('#view').innerHTML = spinner('loading cross-repo edges');
   try {
     const params = activeRepo ? `?repo=${encodeURIComponent(activeRepo)}` : '';
     const rows = await api(`/api/links${params}`);
