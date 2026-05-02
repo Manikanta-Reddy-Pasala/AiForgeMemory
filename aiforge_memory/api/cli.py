@@ -166,7 +166,7 @@ def _cmd_summarise_symbols(args: argparse.Namespace) -> int:
         }))
         return 1
 
-    walked = treesitter_walk.walk_repo(args.repo, path)
+    walked = treesitter_walk.walk_repo(path, repo=args.repo)
     print(json.dumps({
         "stage": "walk", "files": len(walked),
         "symbols": sum(len(w.symbols or []) for w in walked),
