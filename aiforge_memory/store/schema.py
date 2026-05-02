@@ -51,6 +51,60 @@ _INDEX_STATEMENTS: list[str] = [
     "FOR (c:Chunk_v2) ON c.embed_vec "
     "OPTIONS {indexConfig: {`vector.dimensions`: 1024, "
     "                        `vector.similarity_function`: 'cosine'}}",
+
+    # ── Memory layer (Decision_v2 / Observation_v2 / Note_v2) ─────────
+    # Decisions: durable architectural / process choices ("we picked X over Y")
+    "CREATE CONSTRAINT codemem_decision_unique IF NOT EXISTS "
+    "FOR (d:Decision_v2) REQUIRE d.id IS UNIQUE",
+    "CREATE INDEX codemem_decision_repo IF NOT EXISTS "
+    "FOR (d:Decision_v2) ON (d.repo, d.created_at)",
+    "CREATE INDEX codemem_decision_status IF NOT EXISTS "
+    "FOR (d:Decision_v2) ON (d.repo, d.status)",
+    "CREATE FULLTEXT INDEX codemem_decision_ft IF NOT EXISTS "
+    "FOR (d:Decision_v2) ON EACH [d.title, d.body, d.rationale]",
+
+    # Observations: agent / human notes about behaviour, bugs, learnings
+    "CREATE CONSTRAINT codemem_observation_unique IF NOT EXISTS "
+    "FOR (o:Observation_v2) REQUIRE o.id IS UNIQUE",
+    "CREATE INDEX codemem_observation_repo IF NOT EXISTS "
+    "FOR (o:Observation_v2) ON (o.repo, o.created_at)",
+    "CREATE INDEX codemem_observation_kind IF NOT EXISTS "
+    "FOR (o:Observation_v2) ON (o.repo, o.kind)",
+    "CREATE FULLTEXT INDEX codemem_observation_ft IF NOT EXISTS "
+    "FOR (o:Observation_v2) ON EACH [o.text, o.tags_text]",
+    # Vector recall over observations (1024d bge-m3)
+    "CREATE VECTOR INDEX codemem_observation_embed IF NOT EXISTS "
+    "FOR (o:Observation_v2) ON o.embed_vec "
+    "OPTIONS {indexConfig: {`vector.dimensions`: 1024, "
+    "                        `vector.similarity_function`: 'cosine'}}",
+
+    # Notes: free-form memos, README-like; lightweight (no embed required)
+    "CREATE CONSTRAINT codemem_note_unique IF NOT EXISTS "
+    "FOR (n:Note_v2) REQUIRE n.id IS UNIQUE",
+    "CREATE INDEX codemem_note_repo IF NOT EXISTS "
+    "FOR (n:Note_v2) ON (n.repo, n.created_at)",
+    "CREATE FULLTEXT INDEX codemem_note_ft IF NOT EXISTS "
+    "FOR (n:Note_v2) ON EACH [n.title, n.body]",
+
+    # ── Doc layer (Doc_v2) — web/external docs ingested into the graph ─
+    "CREATE CONSTRAINT codemem_doc_unique IF NOT EXISTS "
+    "FOR (d:Doc_v2) REQUIRE d.id IS UNIQUE",
+    "CREATE INDEX codemem_doc_repo IF NOT EXISTS "
+    "FOR (d:Doc_v2) ON (d.repo, d.source_kind)",
+    "CREATE FULLTEXT INDEX codemem_doc_ft IF NOT EXISTS "
+    "FOR (d:Doc_v2) ON EACH [d.title, d.body, d.url]",
+
+    # ── Property indices for new emitted fields ────────────────────────
+    "CREATE INDEX codemem_file_test_flag IF NOT EXISTS "
+    "FOR (f:File_v2) ON (f.repo, f.test_file)",
+    "CREATE INDEX codemem_file_lang IF NOT EXISTS "
+    "FOR (f:File_v2) ON (f.repo, f.lang)",
+    "CREATE INDEX codemem_symbol_visibility IF NOT EXISTS "
+    "FOR (s:Symbol_v2) ON (s.repo, s.visibility)",
+
+    # Cross-repo edge has no node label of its own; nothing to index, but
+    # we record the schema marker on the relationship:
+    # (Repo)-[:CALLS_REPO {via, evidence, confidence, created_at}]->(Repo)
 ]
 
 

@@ -34,6 +34,9 @@ _EXT_LANG: dict[str, str] = {
     ".ts": "typescript",
     ".tsx": "tsx",
     ".js": "javascript",
+    ".jsx": "tsx",   # TSX parser handles JSX trees
+    ".mjs": "javascript",
+    ".cjs": "javascript",
 }
 
 # Documentation extensions — no tree-sitter parse, but still walked +
@@ -316,13 +319,16 @@ def _text(node, source: bytes) -> str:
 
 
 def _load_query(lang: str) -> str:
+    """Resolve language id → query file. tsx maps to typescript (JSX
+    trees are a superset of TS); javascript has its own dedicated
+    query so JS files yield real symbols (the prior fallback to the
+    typescript query matched zero patterns on JS trees because TS-only
+    node types like `interface_declaration` / `type_identifier` don't
+    appear there)."""
     qfile = Path(__file__).parent / "queries" / f"{lang}.scm"
-    if not qfile.is_file():
-        # tsx maps to typescript query
-        if lang == "tsx":
-            qfile = Path(__file__).parent / "queries" / "typescript.scm"
-        elif lang == "javascript":
-            qfile = Path(__file__).parent / "queries" / "typescript.scm"
-        if not qfile.is_file():
-            return ""
-    return qfile.read_text()
+    if qfile.is_file():
+        return qfile.read_text()
+    if lang == "tsx":
+        qfile = Path(__file__).parent / "queries" / "typescript.scm"
+        return qfile.read_text() if qfile.is_file() else ""
+    return ""

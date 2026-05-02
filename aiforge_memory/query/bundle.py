@@ -23,6 +23,11 @@ class ContextBundle:
     callers: list[dict] = field(default_factory=list)
     callees: list[dict] = field(default_factory=list)
     runbook_md: str = ""
+    # Memory layer
+    decisions: list[dict] = field(default_factory=list)
+    observations: list[dict] = field(default_factory=list)
+    # Cross-repo edges crossing this query's surface
+    cross_repo: list[dict] = field(default_factory=list)
     sources_used: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -70,6 +75,36 @@ class ContextBundle:
                 lines.append(f"- caller of {c['target']}: `{c['fqname']}`")
             for c in (self.callees or [])[:6]:
                 lines.append(f"- callee of {c['source']}: `{c['fqname']}`")
+            out.append("\n".join(lines))
+
+        if self.decisions:
+            lines = ["## Decisions"]
+            for d in self.decisions[:5]:
+                title = d.get("title", "")
+                rationale = (d.get("rationale") or "").strip()
+                status = d.get("status") or "active"
+                head = f"- **{title}** ({status})"
+                if rationale:
+                    head += f" — {rationale[:200]}"
+                lines.append(head)
+            out.append("\n".join(lines))
+
+        if self.observations:
+            lines = ["## Observations"]
+            for o in self.observations[:5]:
+                kind = o.get("kind") or "note"
+                text = (o.get("text") or "").strip()
+                lines.append(f"- *{kind}* — {text[:240]}")
+            out.append("\n".join(lines))
+
+        if self.cross_repo:
+            lines = ["## Related repos"]
+            for e in self.cross_repo[:5]:
+                ev = ", ".join(e.get("evidence", [])[:3])
+                lines.append(
+                    f"- `{e['src']}` → `{e['dst']}` via {e['via']} "
+                    f"(conf {e.get('confidence',0):.2f}; {ev})"
+                )
             out.append("\n".join(lines))
 
         if self.sources_used:
@@ -141,6 +176,26 @@ def query(
     bundle.runbook_md = _runbook_for(driver, repo=repo)
     if bundle.runbook_md:
         bundle.sources_used.append("runbook")
+
+    # Memory layer — decisions/observations linked to anchor files/symbols
+    anchor_paths = [f["path"] for f in bundle.files]
+    anchor_syms = [s["fqname"] for s in bundle.symbols]
+    if anchor_paths or anchor_syms:
+        bundle.decisions = _decisions_for(
+            driver, repo=repo, paths=anchor_paths, fqnames=anchor_syms,
+        )
+        bundle.observations = _observations_for(
+            driver, repo=repo, paths=anchor_paths, fqnames=anchor_syms,
+        )
+        if bundle.decisions:
+            bundle.sources_used.append("decisions")
+        if bundle.observations:
+            bundle.sources_used.append("observations")
+
+    # Cross-repo edges originating or terminating at this repo
+    bundle.cross_repo = _cross_repo_for(driver, repo=repo)
+    if bundle.cross_repo:
+        bundle.sources_used.append("cross_repo")
 
     # Token budget — drop low-priority sections if over (rough; chars≈4tok)
     rendered = bundle.render()
@@ -228,3 +283,76 @@ def _runbook_for(driver, *, repo: str) -> str:
             n=repo,
         ).single()
     return row["rb"] if row else ""
+
+
+def _decisions_for(
+    driver, *, repo: str, paths: list[str], fqnames: list[str], limit: int = 5,
+) -> list[dict]:
+    """Decisions whose MENTIONS edges land on any anchor file/symbol,
+    OR are repo-wide and active. Newest first."""
+    cy = (
+        "MATCH (d:Decision_v2 {repo:$repo}) "
+        "WHERE d.status IN ['active','superseded'] AND ( "
+        "  EXISTS { MATCH (d)-[:MENTIONS]->(f:File_v2 {repo:$repo}) "
+        "           WHERE f.path IN $paths } OR "
+        "  EXISTS { MATCH (d)-[:MENTIONS]->(s:Symbol_v2 {repo:$repo}) "
+        "           WHERE s.fqname IN $fqnames } OR "
+        "  NOT EXISTS { MATCH (d)-[:MENTIONS]->() } "
+        ") "
+        "RETURN d.id AS id, d.title AS title, "
+        "       coalesce(d.rationale,'') AS rationale, "
+        "       coalesce(d.body,'') AS body, "
+        "       coalesce(d.status,'active') AS status, "
+        "       coalesce(d.tags,[]) AS tags "
+        "ORDER BY d.created_at DESC LIMIT $limit"
+    )
+    try:
+        with driver.session() as s:
+            return [dict(r) for r in s.run(
+                cy, repo=repo, paths=paths or [""],
+                fqnames=fqnames or [""], limit=limit,
+            )]
+    except Exception:
+        return []
+
+
+def _observations_for(
+    driver, *, repo: str, paths: list[str], fqnames: list[str], limit: int = 5,
+) -> list[dict]:
+    """Observations linked to anchor files/symbols. Vector recall is
+    handled by translator; here we use direct MENTIONS edges only."""
+    cy = (
+        "MATCH (o:Observation_v2 {repo:$repo}) "
+        "WHERE EXISTS { MATCH (o)-[:MENTIONS]->(f:File_v2 {repo:$repo}) "
+        "               WHERE f.path IN $paths } OR "
+        "      EXISTS { MATCH (o)-[:MENTIONS]->(s:Symbol_v2 {repo:$repo}) "
+        "               WHERE s.fqname IN $fqnames } "
+        "RETURN o.id AS id, coalesce(o.kind,'note') AS kind, "
+        "       o.text AS text, coalesce(o.tags,[]) AS tags "
+        "ORDER BY o.created_at DESC LIMIT $limit"
+    )
+    try:
+        with driver.session() as s:
+            return [dict(r) for r in s.run(
+                cy, repo=repo, paths=paths or [""],
+                fqnames=fqnames or [""], limit=limit,
+            )]
+    except Exception:
+        return []
+
+
+def _cross_repo_for(driver, *, repo: str, limit: int = 8) -> list[dict]:
+    """Edges where this repo is on either side. Highest confidence first."""
+    cy = (
+        "MATCH (a:Repo)-[r:CALLS_REPO]->(b:Repo) "
+        "WHERE a.name = $repo OR b.name = $repo "
+        "RETURN a.name AS src, b.name AS dst, r.via AS via, "
+        "       coalesce(r.confidence, 0.0) AS confidence, "
+        "       coalesce(r.evidence, []) AS evidence "
+        "ORDER BY confidence DESC LIMIT $limit"
+    )
+    try:
+        with driver.session() as s:
+            return [dict(r) for r in s.run(cy, repo=repo, limit=limit)]
+    except Exception:
+        return []

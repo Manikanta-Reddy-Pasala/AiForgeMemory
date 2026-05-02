@@ -57,6 +57,12 @@ _DDL = [
         bundle_json TEXT NOT NULL,
         expires_at  REAL NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS git_state (
+        repo        TEXT PRIMARY KEY,
+        head_sha    TEXT NOT NULL,
+        branch      TEXT NOT NULL,
+        last_seen   REAL NOT NULL
+    )""",
 ]
 
 
@@ -83,3 +89,63 @@ def get_repo_pack_sha(conn: sqlite3.Connection, *, repo: str) -> str | None:
         "SELECT pack_sha FROM merkle_repo WHERE repo = ?", (repo,)
     ).fetchone()
     return row[0] if row else None
+
+
+def get_repo_git_head(
+    conn: sqlite3.Connection, *, repo: str,
+) -> tuple[str, str] | None:
+    """Return (head_sha, branch) for repo, or None."""
+    row = conn.execute(
+        "SELECT head_sha, branch FROM git_state WHERE repo = ?", (repo,)
+    ).fetchone()
+    return (row[0], row[1]) if row else None
+
+
+def set_repo_git_head(
+    conn: sqlite3.Connection, *, repo: str, head_sha: str, branch: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO git_state (repo, head_sha, branch, last_seen) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(repo) DO UPDATE SET head_sha=excluded.head_sha, "
+        "  branch=excluded.branch, last_seen=excluded.last_seen",
+        (repo, head_sha, branch, time.time()),
+    )
+    conn.commit()
+
+
+def get_file_hashes(conn: sqlite3.Connection, *, repo: str) -> dict[str, str]:
+    rows = conn.execute(
+        "SELECT path, hash FROM merkle_files WHERE repo = ?", (repo,)
+    ).fetchall()
+    return {p: h for p, h in rows}
+
+
+def upsert_file_hash(
+    conn: sqlite3.Connection, *, repo: str, path: str, file_hash: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO merkle_files (repo, path, hash, last_indexed) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(repo, path) DO UPDATE SET hash=excluded.hash, "
+        "  last_indexed=excluded.last_indexed",
+        (repo, path, file_hash, time.time()),
+    )
+    conn.commit()
+
+
+def upsert_file_hashes(
+    conn: sqlite3.Connection, *, repo: str, hashes: dict[str, str],
+) -> None:
+    """Bulk upsert per-file hashes — used by delta ingest."""
+    if not hashes:
+        return
+    now = time.time()
+    conn.executemany(
+        "INSERT INTO merkle_files (repo, path, hash, last_indexed) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(repo, path) DO UPDATE SET hash=excluded.hash, "
+        "  last_indexed=excluded.last_indexed",
+        [(repo, p, h, now) for p, h in hashes.items()],
+    )
+    conn.commit()
