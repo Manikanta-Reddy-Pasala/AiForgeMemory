@@ -69,6 +69,7 @@ def summarise_symbols(
     repo_root: str | Path,
     limit: int | None = None,
     min_lines: int | None = None,
+    on_each: "callable | None" = None,
 ) -> list[SymbolSummary]:
     """One LLM call per qualifying symbol. Order: largest body first
     so the most expensive things land in the budget.
@@ -76,6 +77,10 @@ def summarise_symbols(
     Args:
         limit: hard cap on LLM calls (None = unlimited)
         min_lines: override env MIN_LINES floor
+        on_each: optional callback ``fn(summary: SymbolSummary, idx: int,
+                 total: int) -> None`` invoked after each LLM response.
+                 The CLI uses this to write incrementally + emit progress
+                 instead of waiting for the whole batch.
     """
     repo_root = Path(repo_root)
     floor = MIN_LINES if min_lines is None else int(min_lines)
@@ -118,7 +123,8 @@ def summarise_symbols(
         candidates = candidates[:max(0, int(limit))]
 
     out: list[SymbolSummary] = []
-    for wf, sym, _ in candidates:
+    total = len(candidates)
+    for idx, (wf, sym, _) in enumerate(candidates):
         ss = SymbolSummary(repo=repo, fqname=sym.fqname)
         body = _slice_body(
             file_bytes_cache[wf.path],
@@ -126,25 +132,31 @@ def summarise_symbols(
         )
         if not body.strip():
             ss.skipped_reason = "too_short"
-            out.append(ss)
-            continue
-        try:
-            raw = _call_llm(
-                body=body, signature=sym.signature or "",
-                doc=getattr(sym, "doc_first_line", "") or "",
-                lang=wf.lang or "", path=wf.path,
-                fqname=sym.fqname,
-            )
-            parsed = _parse(raw)
-            if parsed is None:
+        else:
+            try:
+                raw = _call_llm(
+                    body=body, signature=sym.signature or "",
+                    doc=getattr(sym, "doc_first_line", "") or "",
+                    lang=wf.lang or "", path=wf.path,
+                    fqname=sym.fqname,
+                )
+                parsed = _parse(raw)
+                if parsed is None:
+                    ss.skipped_reason = "llm_error"
+                elif not parsed:
+                    ss.skipped_reason = "trivial"
+                else:
+                    ss.summary = parsed
+            except Exception:
                 ss.skipped_reason = "llm_error"
-            elif not parsed:
-                ss.skipped_reason = "trivial"
-            else:
-                ss.summary = parsed
-        except Exception:
-            ss.skipped_reason = "llm_error"
         out.append(ss)
+        if on_each is not None:
+            try:
+                on_each(ss, idx + 1, total)
+            except Exception:
+                # Callback failure must NOT abort the outer loop —
+                # losing one progress update is acceptable.
+                pass
     return out
 
 

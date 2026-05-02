@@ -172,14 +172,39 @@ def _cmd_summarise_symbols(args: argparse.Namespace) -> int:
         "symbols": sum(len(w.symbols or []) for w in walked),
     }), flush=True)
 
-    summaries = symbol_summary.summarise_symbols(
-        walked, repo=args.repo, repo_root=path,
-        limit=args.limit, min_lines=args.min_lines,
-    )
     drv = _driver()
+    counts = {"written": 0, "trivial": 0, "skipped": 0,
+              "missing": 0, "llm_error": 0}
     try:
-        counts = symbol_summary_writer.write_symbol_summaries(
-            drv, repo=args.repo, summaries=summaries,
+        def _on_each(ss, idx, total):
+            # Stream-write each result so progress shows up in Neo4j +
+            # log without waiting for the whole batch (PCB ~9k symbols
+            # = hours).
+            if not ss.skipped_reason and ss.summary:
+                w = symbol_summary_writer.write_symbol_summaries(
+                    drv, repo=args.repo, summaries=[ss],
+                )
+                for k, v in w.items():
+                    counts[k] = counts.get(k, 0) + v
+            else:
+                if ss.skipped_reason == "trivial":
+                    counts["trivial"] += 1
+                elif ss.skipped_reason == "llm_error":
+                    counts["llm_error"] += 1
+                elif ss.skipped_reason:
+                    counts["skipped"] += 1
+            # Emit progress every 25 results so logs don't drown.
+            if idx == 1 or idx % 25 == 0 or idx == total:
+                print(json.dumps({
+                    "stage": "progress",
+                    "idx": idx, "total": total,
+                    **counts,
+                }), flush=True)
+
+        summaries = symbol_summary.summarise_symbols(
+            walked, repo=args.repo, repo_root=path,
+            limit=args.limit, min_lines=args.min_lines,
+            on_each=_on_each,
         )
     finally:
         drv.close()
