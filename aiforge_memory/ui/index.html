@@ -108,6 +108,7 @@
     .toast { position: fixed; bottom: 20px; right: 20px; padding: 12px 16px; border-radius: 6px; box-shadow: 0 4px 12px rgba(31,40,64,.15); font-size: 12px; max-width: 360px; z-index: 1000; animation: slideIn 0.2s ease-out; }
     .toast.ok  { background: var(--good-soft); color: var(--good); border: 1px solid var(--good); }
     .toast.bad { background: var(--bad-soft);  color: var(--bad);  border: 1px solid var(--bad); }
+    .score-pill { display: inline-block; padding: 1px 6px; margin-left: 6px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-size: 10px; font-family: "JetBrains Mono", monospace; }
     @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: none; opacity: 1; } }
   </style>
 </head>
@@ -355,13 +356,18 @@ function renderSearchResults(r, ms) {
   const b = r.bundle;
   const sec = (title, body) => body ? `<div class="card"><h2>${title}</h2>${body}</div>` : '';
   let out = `<div style="margin-bottom:8px"><strong>${esc(r.query)}</strong> <span class="latency">${ms}ms · intent: ${esc(b.intent || '?')}</span></div>`;
+  const fmtScore = v => (typeof v === 'number' && v > 0)
+    ? `<span class="score-pill" title="retrieval confidence">${v.toFixed(3)}</span>` : '';
   out += sec('Anchor files', (b.files || []).map(f => `
     <div style="margin-bottom:6px">
       <a class="file-link" onclick="openFile('${esc(r.repo)}','${esc(f.path)}')">${esc(f.path)}</a>
+      ${fmtScore(f.score)}
       ${f.summary ? `<div class="summary">${esc(f.summary).slice(0, 280)}</div>` : ''}
     </div>`).join(''));
   out += sec('Symbols', (b.symbols || []).map(s => `
-    <div><span class="badge ${s.kind || ''}">${esc(s.kind||'sym')}</span><code>${esc(s.fqname)}</code> <span class="summary">${esc(s.signature || '')}</span></div>
+    <div><span class="badge ${s.kind || ''}">${esc(s.kind||'sym')}</span><code>${esc(s.fqname)}</code>
+      ${fmtScore(s.score)}
+      <span class="summary">${esc(s.signature || '')}</span></div>
   `).join(''));
   out += sec('Decisions', (b.decisions || []).map(d => `
     <div><strong>${esc(d.title)}</strong> <span class="badge">${esc(d.status)}</span>

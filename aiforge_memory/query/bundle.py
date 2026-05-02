@@ -143,12 +143,18 @@ def query(
         bundle.services = _services_rows(driver, repo=repo, names=g.services)
         bundle.sources_used.append("services")
 
-    # Hydrate File rows (with summary)
+    # Hydrate File rows (with summary). Decorate each row with the
+    # retrieval score the translator computed so the UI can show
+    # "how confident" each anchor is.
     file_paths = list(g.files)
     if hit and hit.kind == "file":
         file_paths = [hit.value] + file_paths
     if file_paths:
         bundle.files = _files_rows(driver, repo=repo, paths=file_paths)
+        for row in bundle.files:
+            row["score"] = float(
+                getattr(g, "file_scores", {}).get(row.get("path"), 0.0)
+            )
         bundle.sources_used.append("files")
 
     # Hydrate Symbol rows
@@ -162,6 +168,11 @@ def query(
         bundle.symbols = _symbols_rows(driver, repo=repo, fqnames=sym_fqnames) \
             + bundle.symbols
         bundle.sources_used.append("symbols")
+    # Decorate symbol rows with retrieval score (0.0 when unranked).
+    for row in bundle.symbols:
+        row["score"] = float(
+            getattr(g, "symbol_scores", {}).get(row.get("fqname"), 0.0)
+        )
 
     # Call neighbours (1 hop) for top symbol
     if bundle.symbols:

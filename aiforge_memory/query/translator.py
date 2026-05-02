@@ -49,6 +49,10 @@ class Grounding:
     keywords: list[str] = field(default_factory=list)
     used_top_k: int = 0
     errors: list[str] = field(default_factory=list)
+    # Per-target retrieval scores (path → score, fqname → score). Surfaced
+    # to the bundle so the UI can show "how confident" each anchor is.
+    file_scores: dict[str, float] = field(default_factory=dict)
+    symbol_scores: dict[str, float] = field(default_factory=dict)
 
 
 def translate(
@@ -177,6 +181,18 @@ def translate(
         g.files = candidate_files[:5]
         g.symbols = candidate_symbols[:5]
 
+    # Surface retrieval scores so the UI / bundle can show confidence.
+    # Files: vector chunk score for that path (0..1). Symbols: best
+    # reciprocal-rank from RRF — proxy for how strongly retrieval voted.
+    g.file_scores = {p: round(file_scores.get(p, 0.0), 4)
+                     for p in g.files}
+    if candidate_symbols:
+        # Build rank-based score from the order symbols emerged.
+        sym_rank = {fq: i for i, fq in enumerate(candidate_symbols)}
+        g.symbol_scores = {
+            fq: round(1.0 / (sym_rank[fq] + 1.0), 4)
+            for fq in g.symbols if fq in sym_rank
+        }
     return g
 
 
