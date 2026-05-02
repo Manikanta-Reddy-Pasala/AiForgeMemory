@@ -268,8 +268,8 @@ def _call_llm(
     # the reference but here we keep the LLM-facing text tight to avoid
     # token-length triggers in mlx-lm.
     user = (
-        "Summarise this method in ONE sentence (≤25 words, present "
-        "tense, what it DOES — side effects, IO, control flow). "
+        "Summarise this method in ONE sentence (max 25 words, present "
+        "tense, what it DOES - side effects, IO, control flow). "
         "Output STRICT JSON only: {\"summary\":\"...\"}. "
         "If trivial (getter/setter/delegate/DTO), output {\"summary\":\"\"}.\n"
         "---\n"
@@ -286,19 +286,38 @@ def _call_llm(
         ],
         "temperature": 0.0,
         "max_tokens": 120,
+        # Some Qwen3 builds emit chain-of-thought into reasoning_content
+        # by default. We don't need it — the JSON answer is what counts.
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     url = DEFAULT_LM_URL.rstrip("/") + "/chat/completions"
     api_key = os.environ.get("AIFORGE_CODEMEM_LM_KEY", "lm-studio")
 
     last_exc: Exception | None = None
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        # Force Connection: close so mlx-lm sees one-shot requests.
+        # httpx default keep-alive + connection pooling triggers
+        # "Connection reset by peer" mid-stream on mlx-lm 0.31.
+        "Connection": "close",
+    }
+    # Build the JSON body once so we can stream it as raw bytes — keeps
+    # the request shape identical to a `curl --data` call.
+    import json as _json
+
+    raw_body = _json.dumps(payload).encode("utf-8")
+
     for attempt in range(RETRY_MAX + 1):
         try:
-            with httpx.Client(timeout=REQUEST_TIMEOUT_S) as c:
-                r = c.post(url, json=payload, headers={
-                    "Authorization": f"Bearer {api_key}",
-                })
-            # mlx-lm 4xx → permanent (bad model id, bad payload). 5xx →
-            # transient (worth one retry).
+            # http2=False, no client reuse, no transport pool.
+            with httpx.Client(
+                timeout=REQUEST_TIMEOUT_S,
+                http2=False,
+                limits=httpx.Limits(max_keepalive_connections=0,
+                                    max_connections=1),
+            ) as c:
+                r = c.post(url, content=raw_body, headers=headers)
             if 400 <= r.status_code < 500:
                 r.raise_for_status()
             r.raise_for_status()
@@ -307,7 +326,11 @@ def _call_llm(
             if not choices:
                 return ""
             msg = choices[0].get("message") or {}
-            return msg.get("content") or ""
+            # Some Qwen3 thinking models leave content="" and put the
+            # answer (which often still contains our JSON) in
+            # reasoning_content. Try content first, fall back.
+            return (msg.get("content") or "").strip() \
+                   or (msg.get("reasoning_content") or "").strip()
         except (httpx.HTTPStatusError,):
             raise  # 4xx — don't retry
         except Exception as exc:  # noqa: BLE001
