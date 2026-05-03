@@ -153,6 +153,9 @@ def build_app():
                            coalesce(s.visibility,'') AS visibility,
                            coalesce(s.return_type,'') AS return_type,
                            coalesce(s.summary,'') AS summary,
+                           coalesce(s.doc_first_line,'') AS doc,
+                           coalesce(s.modifiers,[]) AS modifiers,
+                           coalesce(s.deprecated,false) AS deprecated,
                            s.line_start AS line_start, s.line_end AS line_end
                     ORDER BY s.line_start
                 """, r=repo, p=path)]

@@ -156,12 +156,23 @@ def translate(
     except Exception as exc:
         g.errors.append(f"summaries: {exc}")
 
+    # Hydrate symbol summaries so the T2 grounding LLM can see what
+    # each candidate symbol actually does (cuts grounding errors).
+    sym_summaries: dict[str, str] = {}
+    try:
+        sym_summaries = _symbol_summaries(
+            driver, repo=repo, fqnames=candidate_symbols,
+        )
+    except Exception as exc:
+        g.errors.append(f"sym_summaries: {exc}")
+
     # T2 — LLM grounding
     try:
         raw = _call_llm(
             text=text, services=services,
             files=candidate_files, symbols=candidate_symbols,
             file_summaries=file_summaries, file_scores=file_scores,
+            symbol_summaries=sym_summaries,
         )
         parsed = _parse(raw)
         if parsed:
@@ -465,6 +476,28 @@ def _file_summaries(
         return {r["path"]: r["summary"] for r in s.run(cy, repo=repo, paths=paths)}
 
 
+def _symbol_summaries(
+    driver, *, repo: str, fqnames: list[str],
+) -> dict[str, str]:
+    """Bulk-fetch Symbol_v2.summary for candidate fqnames. Falls back
+    to doc_first_line when no LLM summary exists yet — partial coverage
+    is fine because the grounding LLM degrades gracefully without it."""
+    if not fqnames:
+        return {}
+    cy = (
+        "MATCH (s:Symbol_v2 {repo:$repo}) WHERE s.fqname IN $fqs "
+        "RETURN s.fqname AS f, "
+        "       coalesce(NULLIF(s.summary,''), s.doc_first_line, '') AS d"
+    )
+    with driver.session() as sess:
+        out = {}
+        for r in sess.run(cy, repo=repo, fqs=fqnames):
+            d = (r["d"] or "").strip()
+            if d:
+                out[r["f"]] = d
+        return out
+
+
 def _services_for(driver, *, repo: str) -> list[str]:
     with driver.session() as s:
         rows = list(s.run(
@@ -494,12 +527,15 @@ def _call_llm(
     symbols: list[str],
     file_summaries: dict[str, str] | None = None,
     file_scores: dict[str, float] | None = None,
+    symbol_summaries: dict[str, str] | None = None,
 ) -> str:
     """Real LLM call. Isolated for monkey-patching in tests.
 
     file_summaries: optional {path: summary} so the LLM grounds on
     semantics, not just filename. file_scores: optional {path: score}
-    so the LLM weights vector-confidence into its pick."""
+    so the LLM weights vector-confidence into its pick. symbol_summaries:
+    optional {fqname: behaviour-summary-or-docstring} so the LLM picks
+    based on what each method actually does, not just by name shape."""
     from openai import OpenAI
 
     client = OpenAI(
@@ -519,11 +555,26 @@ def _call_llm(
             item["score"] = round(float(file_scores[p]), 3)
         enriched_files.append(item)
 
+    # Same enrichment for symbols. Falls back to flat string list when
+    # we have no summaries (older repos, pre-summary feature).
+    enriched_symbols: list = []
+    if symbol_summaries:
+        for fq in symbols:
+            d = symbol_summaries.get(fq, "")
+            if d:
+                enriched_symbols.append(
+                    {"fqname": fq, "summary": d[:240]}
+                )
+            else:
+                enriched_symbols.append({"fqname": fq})
+    else:
+        enriched_symbols = symbols
+
     payload = {
         "query": text,
         "services_catalog": services,
         "candidate_files": enriched_files,
-        "candidate_symbols": symbols,
+        "candidate_symbols": enriched_symbols,
     }
     user = json.dumps(payload, indent=2)
     resp = client.chat.completions.create(

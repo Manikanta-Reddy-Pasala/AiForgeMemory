@@ -65,7 +65,17 @@ class ContextBundle:
             lines = ["## Symbols"]
             for s in self.symbols[:12]:
                 sig = s.get("signature", "")
-                lines.append(f"- `{s['fqname']}` — `{sig}`")
+                summ = (s.get("summary") or "").strip()
+                # Fall back to doc_first_line when no LLM summary yet.
+                fallback = (s.get("doc") or "").strip()
+                describe = summ or fallback
+                tag = " ⚠ DEPRECATED" if s.get("deprecated") else ""
+                if describe:
+                    lines.append(
+                        f"- `{s['fqname']}`{tag} — `{sig}` — {describe}"
+                    )
+                else:
+                    lines.append(f"- `{s['fqname']}`{tag} — `{sig}`")
             out.append("\n".join(lines))
 
         if self.callers or self.callees:
@@ -242,11 +252,21 @@ def _files_rows(driver, *, repo: str, paths: list[str]) -> list[dict]:
         return [dict(r) for r in sess.run(cy, repo=repo, paths=paths)]
 
 
+_SYM_FIELDS = (
+    " s.fqname AS fqname, s.kind AS kind, "
+    " s.file_path AS file_path, s.signature AS signature, "
+    " coalesce(s.summary, '') AS summary, "
+    " coalesce(s.doc_first_line, '') AS doc, "
+    " coalesce(s.modifiers, []) AS modifiers, "
+    " coalesce(s.deprecated, false) AS deprecated, "
+    " coalesce(s.return_type, '') AS return_type "
+)
+
+
 def _symbols_rows(driver, *, repo: str, fqnames: list[str]) -> list[dict]:
     cy = (
         "MATCH (s:Symbol_v2 {repo:$repo}) WHERE s.fqname IN $fqnames "
-        "RETURN s.fqname AS fqname, s.kind AS kind, "
-        "       s.file_path AS file_path, s.signature AS signature"
+        "RETURN" + _SYM_FIELDS
     )
     with driver.session() as sess:
         return [dict(r) for r in sess.run(cy, repo=repo, fqnames=fqnames)]
@@ -256,8 +276,7 @@ def _symbols_by_terminal_name(driver, *, repo: str, name: str) -> list[dict]:
     cy = (
         "MATCH (s:Symbol_v2 {repo:$repo}) "
         "WHERE s.fqname ENDS WITH $suffix "
-        "RETURN s.fqname AS fqname, s.kind AS kind, "
-        "       s.file_path AS file_path, s.signature AS signature LIMIT 6"
+        "RETURN" + _SYM_FIELDS + " LIMIT 6"
     )
     with driver.session() as sess:
         return [dict(r) for r in sess.run(cy, repo=repo, suffix=f"::{name}")]

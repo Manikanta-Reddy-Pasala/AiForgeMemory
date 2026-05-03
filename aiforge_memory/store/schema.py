@@ -41,7 +41,7 @@ _INDEX_STATEMENTS: list[str] = [
     "FOR (s:Symbol_v2) ON (s.repo, s.kind)",
     # Fulltext over Symbol signatures so NL query can hit "send method"
     "CREATE FULLTEXT INDEX codemem_symbol_signature_ft IF NOT EXISTS "
-    "FOR (s:Symbol_v2) ON EACH [s.signature, s.fqname, s.doc_first_line]",
+    "FOR (s:Symbol_v2) ON EACH [s.signature, s.fqname, s.doc_first_line, s.summary]",
     # Chunk_v2 — keyed on globally unique id (file_path + offset)
     "CREATE CONSTRAINT codemem_chunk_unique IF NOT EXISTS "
     "FOR (c:Chunk_v2) REQUIRE c.id IS UNIQUE",

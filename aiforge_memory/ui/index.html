@@ -433,14 +433,20 @@ async function openFile(repo, path) {
       <div class="k">summary</div><div>${esc(r.meta.summary || '(none)')}</div>
     </div></div>`;
     if (r.symbols?.length) {
-      out += `<h2>Symbols (${r.symbols.length})</h2>` + r.symbols.map(s => `
-        <div class="card">
+      out += `<h2>Symbols (${r.symbols.length})</h2>` + r.symbols.map(s => {
+        const mods = (s.modifiers || []).join(' ');
+        const dep = s.deprecated ? ' <span class="badge" style="background:var(--bad-soft);color:var(--bad)">DEPRECATED</span>' : '';
+        const sumLine = s.summary ? `<div class="summary" style="margin-top:6px">💡 ${esc(s.summary)}</div>` : '';
+        const docLine = (!s.summary && s.doc) ? `<div class="summary" style="margin-top:6px;font-style:italic">📝 ${esc(s.doc)}</div>` : '';
+        return `<div class="card">
           <span class="badge ${s.kind}">${esc(s.kind)}</span>
-          <code>${esc(s.fqname.split('::').pop())}</code>
-          <span class="latency">L${s.line_start}–${s.line_end} · ${esc(s.visibility || '')} ${esc(s.return_type || '')}</span>
-          ${s.summary ? `<div class="summary" style="margin-top:6px">💡 ${esc(s.summary)}</div>` : ''}
+          <code>${esc(s.fqname.split('::').pop())}</code>${dep}
+          <span class="latency">L${s.line_start}–${s.line_end} · ${esc(s.visibility || '')} ${esc(mods)} ${esc(s.return_type || '')}</span>
+          ${sumLine}
+          ${docLine}
           <div class="summary"><code>${esc(s.signature || '')}</code></div>
-        </div>`).join('');
+        </div>`;
+      }).join('');
     }
     if (r.chunks?.length) {
       out += `<h2>Chunks (${r.chunks.length})</h2>` + r.chunks.map(c => `
