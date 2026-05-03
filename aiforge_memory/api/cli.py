@@ -167,12 +167,36 @@ def _cmd_summarise_symbols(args: argparse.Namespace) -> int:
         return 1
 
     walked = treesitter_walk.walk_repo(path, repo=args.repo)
+    total_walked_syms = sum(len(w.symbols or []) for w in walked)
     print(json.dumps({
         "stage": "walk", "files": len(walked),
-        "symbols": sum(len(w.symbols or []) for w in walked),
+        "symbols": total_walked_syms,
     }), flush=True)
 
     drv = _driver()
+    # Idempotent resume: drop symbols already summarised so a restart
+    # picks up where the previous run stopped instead of redoing work.
+    already: set[str] = set()
+    if not getattr(args, "redo_existing", False):
+        with drv.session() as s:
+            for r in s.run(
+                "MATCH (sym:Symbol_v2 {repo:$n}) "
+                "WHERE sym.summary IS NOT NULL "
+                "RETURN sym.fqname AS f", n=args.repo,
+            ):
+                already.add(r["f"])
+        if already:
+            for wf in walked:
+                wf.symbols = [
+                    sym for sym in (wf.symbols or [])
+                    if sym.fqname not in already
+                ]
+            print(json.dumps({
+                "stage": "resume",
+                "already_summarised": len(already),
+                "remaining_walk_symbols":
+                    sum(len(w.symbols or []) for w in walked),
+            }), flush=True)
     counts = {"written": 0, "trivial": 0, "skipped": 0,
               "missing": 0, "llm_error": 0}
     try:
@@ -612,6 +636,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="Skip symbols shorter than this many lines (default 8)")
     ss.add_argument("--limit", type=int, default=None,
                     help="Hard cap on LLM calls (largest bodies first)")
+    ss.add_argument("--redo-existing", action="store_true",
+                    help="Re-summarise symbols that already have a "
+                         "Symbol_v2.summary (default: skip them)")
     ss.set_defaults(func=_cmd_summarise_symbols)
 
     sv = sub.add_parser("services", help="List services for a repo")
