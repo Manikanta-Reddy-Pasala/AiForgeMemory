@@ -109,6 +109,8 @@
     .toast.ok  { background: var(--good-soft); color: var(--good); border: 1px solid var(--good); }
     .toast.bad { background: var(--bad-soft);  color: var(--bad);  border: 1px solid var(--bad); }
     .score-pill { display: inline-block; padding: 1px 6px; margin-left: 6px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-size: 10px; font-family: "JetBrains Mono", monospace; }
+    .param-pill { display: inline-block; padding: 2px 8px; margin: 2px 4px 2px 0; border-radius: 4px; background: var(--hover); color: var(--fg); font-size: 11px; border: 1px solid var(--border); font-family: "JetBrains Mono", "SF Mono", monospace; }
+    .param-pill code { color: var(--accent); background: transparent; padding: 0; }
     @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: none; opacity: 1; } }
   </style>
 </head>
@@ -438,12 +440,17 @@ async function openFile(repo, path) {
         const dep = s.deprecated ? ' <span class="badge" style="background:var(--bad-soft);color:var(--bad)">DEPRECATED</span>' : '';
         const sumLine = s.summary ? `<div class="summary" style="margin-top:6px">💡 ${esc(s.summary)}</div>` : '';
         const docLine = (!s.summary && s.doc) ? `<div class="summary" style="margin-top:6px;font-style:italic">📝 ${esc(s.doc)}</div>` : '';
+        const params = (s.params || []).map(p =>
+          `<span class="param-pill"><code>${esc(p.name||'?')}</code>: ${esc(p.type||'?')}</span>`
+        ).join('');
+        const paramLine = params ? `<div style="margin-top:6px">${params}</div>` : '';
         return `<div class="card">
           <span class="badge ${s.kind}">${esc(s.kind)}</span>
           <code>${esc(s.fqname.split('::').pop())}</code>${dep}
           <span class="latency">L${s.line_start}–${s.line_end} · ${esc(s.visibility || '')} ${esc(mods)} ${esc(s.return_type || '')}</span>
           ${sumLine}
           ${docLine}
+          ${paramLine}
           <div class="summary"><code>${esc(s.signature || '')}</code></div>
         </div>`;
       }).join('');

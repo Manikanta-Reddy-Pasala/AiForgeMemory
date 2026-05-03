@@ -156,9 +156,19 @@ def build_app():
                            coalesce(s.doc_first_line,'') AS doc,
                            coalesce(s.modifiers,[]) AS modifiers,
                            coalesce(s.deprecated,false) AS deprecated,
+                           coalesce(s.params_json,'') AS params_json,
                            s.line_start AS line_start, s.line_end AS line_end
                     ORDER BY s.line_start
                 """, r=repo, p=path)]
+                # Parse params_json on the server so the UI doesn't need
+                # to fight Cypher's string typing.
+                import json as _json
+                for sym in symbols:
+                    raw = sym.pop("params_json", "")
+                    try:
+                        sym["params"] = _json.loads(raw) if raw else []
+                    except (ValueError, TypeError):
+                        sym["params"] = []
                 chunks = [dict(r) for r in s.run("""
                     MATCH (f:File_v2 {repo:$r, path:$p})-[:CHUNKED_AS]->(c:Chunk_v2)
                     RETURN c.id AS id, c.line_start AS line_start,

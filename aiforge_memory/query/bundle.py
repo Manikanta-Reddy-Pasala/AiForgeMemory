@@ -62,20 +62,33 @@ class ContextBundle:
             out.append("\n".join(lines))
 
         if self.symbols:
+            import json as _json
             lines = ["## Symbols"]
             for s in self.symbols[:12]:
                 sig = s.get("signature", "")
                 summ = (s.get("summary") or "").strip()
-                # Fall back to doc_first_line when no LLM summary yet.
                 fallback = (s.get("doc") or "").strip()
                 describe = summ or fallback
                 tag = " ⚠ DEPRECATED" if s.get("deprecated") else ""
+                # Compact params line — agent-friendly stub generation.
+                params_str = ""
+                pj = s.get("params_json") or ""
+                if pj:
+                    try:
+                        ps = _json.loads(pj)
+                        if isinstance(ps, list) and ps:
+                            params_str = " params: " + ", ".join(
+                                f"{p.get('name','?')}:{p.get('type','?')}"
+                                for p in ps[:8]
+                            )
+                    except (ValueError, TypeError):
+                        pass
                 if describe:
                     lines.append(
-                        f"- `{s['fqname']}`{tag} — `{sig}` — {describe}"
+                        f"- `{s['fqname']}`{tag} — `{sig}` — {describe}{params_str}"
                     )
                 else:
-                    lines.append(f"- `{s['fqname']}`{tag} — `{sig}`")
+                    lines.append(f"- `{s['fqname']}`{tag} — `{sig}`{params_str}")
             out.append("\n".join(lines))
 
         if self.callers or self.callees:
@@ -259,7 +272,8 @@ _SYM_FIELDS = (
     " coalesce(s.doc_first_line, '') AS doc, "
     " coalesce(s.modifiers, []) AS modifiers, "
     " coalesce(s.deprecated, false) AS deprecated, "
-    " coalesce(s.return_type, '') AS return_type "
+    " coalesce(s.return_type, '') AS return_type, "
+    " coalesce(s.params_json, '') AS params_json "
 )
 
 
