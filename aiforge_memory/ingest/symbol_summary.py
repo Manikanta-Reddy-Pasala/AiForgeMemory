@@ -65,6 +65,11 @@ RETRY_BACKOFF_S = float(os.environ.get(
 ABORT_AFTER_CONSECUTIVE_ERRORS = int(os.environ.get(
     "AIFORGE_SYMSUM_ABORT_AFTER", "8",
 ))
+# Concurrency — LM Studio's PARALLEL slot count. 1 keeps the legacy
+# serial behaviour. >1 dispatches calls via a thread pool.
+CONCURRENCY = max(1, int(os.environ.get(
+    "AIFORGE_SYMSUM_CONCURRENCY", "1",
+)))
 
 
 class SymbolSummaryAborted(RuntimeError):
@@ -146,11 +151,14 @@ def summarise_symbols(
         candidates = candidates[:max(0, int(limit))]
 
     import time as _time
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     out: list[SymbolSummary] = []
     total = len(candidates)
-    consecutive_errors = 0
-    for idx, (wf, sym, _) in enumerate(candidates):
+
+    def _process_one(wf, sym) -> SymbolSummary:
+        """Single LLM round-trip for one candidate. Pure: no shared state."""
         ss = SymbolSummary(repo=repo, fqname=sym.fqname)
         body = _slice_body(
             file_bytes_cache[wf.path],
@@ -158,51 +166,113 @@ def summarise_symbols(
         )
         if not body.strip():
             ss.skipped_reason = "too_short"
-        else:
-            try:
-                raw = _call_llm(
-                    body=body, signature=sym.signature or "",
-                    doc=getattr(sym, "doc_first_line", "") or "",
-                    lang=wf.lang or "", path=wf.path,
-                    fqname=sym.fqname,
-                )
-                parsed = _parse(raw)
-                if parsed is None:
-                    ss.skipped_reason = "llm_error"
-                elif not parsed:
-                    ss.skipped_reason = "trivial"
-                else:
-                    ss.summary = parsed
-            except Exception:
+            return ss
+        try:
+            raw = _call_llm(
+                body=body, signature=sym.signature or "",
+                doc=getattr(sym, "doc_first_line", "") or "",
+                lang=wf.lang or "", path=wf.path,
+                fqname=sym.fqname,
+            )
+            parsed = _parse(raw)
+            if parsed is None:
                 ss.skipped_reason = "llm_error"
-        out.append(ss)
+            elif not parsed:
+                ss.skipped_reason = "trivial"
+            else:
+                ss.summary = parsed
+        except Exception:
+            ss.skipped_reason = "llm_error"
+        return ss
 
-        # Circuit breaker — abort if the LLM is dead, rather than
-        # burning the rest of the candidate list.
-        if ss.skipped_reason == "llm_error":
-            consecutive_errors += 1
-        else:
-            consecutive_errors = 0
-        if consecutive_errors >= ABORT_AFTER_CONSECUTIVE_ERRORS:
+    if CONCURRENCY <= 1:
+        # Legacy serial path — preserved so the simple case stays simple
+        # and the throttle / abort semantics are byte-identical.
+        consecutive_errors = 0
+        for idx, (wf, sym, _) in enumerate(candidates):
+            ss = _process_one(wf, sym)
+            out.append(ss)
+            if ss.skipped_reason == "llm_error":
+                consecutive_errors += 1
+            else:
+                consecutive_errors = 0
+            if consecutive_errors >= ABORT_AFTER_CONSECUTIVE_ERRORS:
+                if on_each is not None:
+                    try:
+                        on_each(ss, idx + 1, total)
+                    except Exception:
+                        pass
+                raise SymbolSummaryAborted(
+                    f"{consecutive_errors} consecutive LLM errors — "
+                    "aborting; restart the LLM server and retry"
+                )
             if on_each is not None:
                 try:
                     on_each(ss, idx + 1, total)
                 except Exception:
                     pass
-            raise SymbolSummaryAborted(
-                f"{consecutive_errors} consecutive LLM errors — "
-                "aborting; restart the LLM server and retry"
-            )
+            if INTER_CALL_DELAY_S > 0 and idx + 1 < total:
+                _time.sleep(INTER_CALL_DELAY_S)
+        return out
 
-        if on_each is not None:
+    # Concurrent path — submit candidates to a thread pool sized to the
+    # LLM server's PARALLEL slot count. Throttle becomes irrelevant
+    # because the queue itself bounds concurrency. Circuit breaker now
+    # tracks rolling-window errors instead of strict-consecutive (which
+    # is order-sensitive and order isn't guaranteed at this layer).
+    cb_lock = threading.Lock()
+    cb_state = {"recent": [], "done": 0}    # recent: 1=err, 0=ok
+    cb_window = max(8, ABORT_AFTER_CONSECUTIVE_ERRORS * 2)
+
+    def _record(ss: SymbolSummary) -> bool:
+        """Update rolling-window CB. Returns True if we should keep going."""
+        with cb_lock:
+            cb_state["recent"].append(
+                1 if ss.skipped_reason == "llm_error" else 0,
+            )
+            if len(cb_state["recent"]) > cb_window:
+                cb_state["recent"].pop(0)
+            cb_state["done"] += 1
+            window_full = len(cb_state["recent"]) >= cb_window
+            err_count = sum(cb_state["recent"])
+        # Trip if the last cb_window calls are >=ABORT_AFTER all errors.
+        return not (window_full and err_count >= ABORT_AFTER_CONSECUTIVE_ERRORS)
+
+    abort_msg: str | None = None
+    with ThreadPoolExecutor(max_workers=CONCURRENCY,
+                            thread_name_prefix="symsum") as pool:
+        future_to_meta = {
+            pool.submit(_process_one, wf, sym): (idx, wf, sym)
+            for idx, (wf, sym, _) in enumerate(candidates)
+        }
+        for fut in as_completed(future_to_meta):
+            idx, wf, sym = future_to_meta[fut]
             try:
-                on_each(ss, idx + 1, total)
+                ss = fut.result()
             except Exception:
-                # Callback failure must NOT abort the outer loop —
-                # losing one progress update is acceptable.
-                pass
-        if INTER_CALL_DELAY_S > 0 and idx + 1 < total:
-            _time.sleep(INTER_CALL_DELAY_S)
+                ss = SymbolSummary(
+                    repo=repo, fqname=sym.fqname,
+                    skipped_reason="llm_error",
+                )
+            out.append(ss)
+            keep_going = _record(ss)
+            if on_each is not None:
+                try:
+                    on_each(ss, cb_state["done"], total)
+                except Exception:
+                    pass
+            if not keep_going and abort_msg is None:
+                abort_msg = (
+                    f"{ABORT_AFTER_CONSECUTIVE_ERRORS}+ errors in last "
+                    f"{cb_window} calls — aborting"
+                )
+                # Cancel pending futures so the pool drains fast.
+                for f in future_to_meta:
+                    if not f.done():
+                        f.cancel()
+                break
+    if abort_msg:
+        raise SymbolSummaryAborted(abort_msg)
     return out
 
 
