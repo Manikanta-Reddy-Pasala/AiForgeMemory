@@ -109,6 +109,26 @@
     .toast.ok  { background: var(--good-soft); color: var(--good); border: 1px solid var(--good); }
     .toast.bad { background: var(--bad-soft);  color: var(--bad);  border: 1px solid var(--bad); }
     .score-pill { display: inline-block; padding: 1px 6px; margin-left: 6px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-size: 10px; font-family: "JetBrains Mono", monospace; }
+    /* Graphify tab — repo table + inline content panel */
+    .graph-toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+    .graph-toolbar input[type=text] { flex: 1; max-width: 360px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--card); color: var(--fg); font-size: 12px; font-family: inherit; }
+    .graph-toolbar input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    table.graph-tbl { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; box-shadow: 0 1px 2px rgba(31,40,64,.04); }
+    table.graph-tbl th, table.graph-tbl td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 12px; }
+    table.graph-tbl th { background: var(--hover); color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; }
+    table.graph-tbl tr:last-child td { border-bottom: none; }
+    table.graph-tbl tr:hover td { background: var(--hover); }
+    table.graph-tbl td.num { font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; color: var(--muted); text-align: right; }
+    table.graph-tbl td.actions { text-align: right; white-space: nowrap; }
+    table.graph-tbl td.actions a { margin-left: 8px; }
+    table.graph-tbl td.actions a.disabled { color: var(--muted); pointer-events: none; }
+    .graph-panel { margin-top: 16px; }
+    .graph-panel .panel-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+    .graph-panel .panel-head h3 { margin: 0; font-size: 13px; }
+    .graph-panel .panel-head .closer { margin-left: auto; cursor: pointer; color: var(--muted); }
+    .graph-panel .panel-head .closer:hover { color: var(--bad); }
+    .graph-panel iframe { width: 100%; height: 70vh; border: 1px solid var(--border); border-radius: 6px; background: var(--card); }
+    .graph-panel pre.md-render { white-space: pre-wrap; word-break: break-word; max-height: 70vh; overflow-y: auto; }
     .param-pill { display: inline-block; padding: 2px 8px; margin: 2px 4px 2px 0; border-radius: 4px; background: var(--hover); color: var(--fg); font-size: 11px; border: 1px solid var(--border); font-family: "JetBrains Mono", "SF Mono", monospace; }
     .param-pill code { color: var(--accent); background: transparent; padding: 0; }
     @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: none; opacity: 1; } }
@@ -136,6 +156,7 @@
         <div class="tab" data-view="repo">Repo</div>
         <div class="tab" data-view="memory">Memory</div>
         <div class="tab" data-view="links">Links</div>
+        <div class="tab" data-view="graph">Graph</div>
         <div class="tab" data-view="scheduler">Scheduler</div>
       </div>
       <div id="view"></div>
@@ -324,6 +345,7 @@ function setView(v) {
   else if (v === 'repo') loadRepoView();
   else if (v === 'memory') loadMemoryView();
   else if (v === 'links') loadLinksView();
+  else if (v === 'graph') loadGraphView();
   else if (v === 'scheduler') loadSchedulerView();
 }
 
@@ -555,6 +577,151 @@ async function loadLinksView() {
   } catch (e) {
     $('#view').innerHTML = `<div class="err">${esc(e.message)}</div>`;
   }
+}
+
+// ── Graph (graphify-out browser) ──────────────────────────────────
+
+let graphRepos = [];
+let graphFilter = '';
+
+function fmtSize(kb) {
+  if (!kb) return '—';
+  if (kb < 1024) return `${kb} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+function fmtUpdated(iso) {
+  if (!iso) return '—';
+  // Show as YYYY-MM-DD HH:MM (local) — mimics scheduler row formatting.
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleString();
+  } catch { return iso; }
+}
+
+async function loadGraphView() {
+  $('#view').innerHTML = spinner('scanning for graphify-out directories');
+  try {
+    graphRepos = await api('/api/graphify');
+  } catch (e) {
+    $('#view').innerHTML = `<div class="err">${esc(e.message)}</div>`;
+    return;
+  }
+  renderGraphView();
+}
+
+function renderGraphView() {
+  const header = `<h2>Graphify <span class="latency">(${graphRepos.length} repos)</span></h2>`
+    + `<div class="graph-toolbar">`
+    + `<input type="text" id="gfFilter" placeholder="filter by repo name…" value="${esc(graphFilter)}">`
+    + `</div>`;
+
+  if (!graphRepos.length) {
+    $('#view').innerHTML = header + `<div class="empty">No repos have a <code>graphify-out</code> directory yet. Run <code>graphify update &lt;repo&gt;</code> from the repo root to generate one.</div>`;
+    wireGraphFilter();
+    return;
+  }
+
+  const filt = graphFilter.toLowerCase();
+  const rows = graphRepos.filter(r => !filt || r.repo.toLowerCase().includes(filt));
+
+  if (!rows.length) {
+    $('#view').innerHTML = header + `<div class="empty">No repos match <strong>${esc(graphFilter)}</strong>.</div>`
+      + `<div id="gfPanelHost"></div>`;
+    wireGraphFilter();
+    return;
+  }
+
+  let table = `<table class="graph-tbl">
+    <thead><tr>
+      <th>Repo</th>
+      <th style="text-align:right">Nodes</th>
+      <th style="text-align:right">Size</th>
+      <th>Updated</th>
+      <th>Path</th>
+      <th style="text-align:right">Actions</th>
+    </tr></thead><tbody>`;
+  table += rows.map(r => {
+    const repo = esc(r.repo);
+    const repoEnc = encodeURIComponent(r.repo);
+    const reportLink = r.has_report
+      ? `<a onclick="openGraphReport('${repo}')">Report</a>`
+      : `<a class="disabled">Report</a>`;
+    const jsonLink = r.has_graph_json
+      ? `<a href="/api/graphify/${repoEnc}/graph" target="_blank" rel="noopener">JSON</a>`
+      : `<a class="disabled">JSON</a>`;
+    const wikiLink = r.has_wiki
+      ? `<a onclick="openGraphWiki('${repo}')">Wiki</a>`
+      : `<a class="disabled">Wiki</a>`;
+    return `<tr>
+      <td><strong>${repo}</strong></td>
+      <td class="num">${r.node_count.toLocaleString()}</td>
+      <td class="num">${fmtSize(r.size_kb)}</td>
+      <td>${esc(fmtUpdated(r.updated_at))}</td>
+      <td><code class="file-link">${esc(r.path)}</code></td>
+      <td class="actions">${reportLink}${jsonLink}${wikiLink}</td>
+    </tr>`;
+  }).join('');
+  table += `</tbody></table>`;
+
+  $('#view').innerHTML = header + table + `<div id="gfPanelHost"></div>`;
+  wireGraphFilter();
+}
+
+function wireGraphFilter() {
+  const inp = $('#gfFilter');
+  if (!inp) return;
+  inp.addEventListener('input', e => {
+    graphFilter = e.target.value;
+    renderGraphView();
+    // Restore focus + caret position after re-render.
+    const again = $('#gfFilter');
+    if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
+  });
+}
+
+async function openGraphReport(repo) {
+  const host = $('#gfPanelHost');
+  if (!host) return;
+  host.innerHTML = `<div class="card graph-panel">${spinner(`loading GRAPH_REPORT.md for ${repo}`)}</div>`;
+  try {
+    const r = await fetch(`/api/graphify/${encodeURIComponent(repo)}/report`);
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    const md = await r.text();
+    host.innerHTML = `<div class="card graph-panel">
+      <div class="panel-head">
+        <h3>${esc(repo)} · GRAPH_REPORT.md</h3>
+        <a href="/api/graphify/${encodeURIComponent(repo)}/report" target="_blank" rel="noopener" class="latency">open raw</a>
+        <span class="closer" onclick="closeGraphPanel()">close ✕</span>
+      </div>
+      <pre class="md-render">${esc(md)}</pre>
+    </div>`;
+    host.scrollIntoView({behavior: 'smooth', block: 'start'});
+  } catch (e) {
+    host.innerHTML = `<div class="card graph-panel"><div class="err">${esc(e.message)}</div></div>`;
+  }
+}
+
+function openGraphWiki(repo) {
+  const host = $('#gfPanelHost');
+  if (!host) return;
+  // Try index.md first; the server falls back to index.html if .md missing.
+  const url = `/graphify/${encodeURIComponent(repo)}/wiki/index.md`;
+  host.innerHTML = `<div class="card graph-panel">
+    <div class="panel-head">
+      <h3>${esc(repo)} · wiki</h3>
+      <a href="${url}" target="_blank" rel="noopener" class="latency">open in new tab</a>
+      <span class="closer" onclick="closeGraphPanel()">close ✕</span>
+    </div>
+    <iframe src="${url}" sandbox="allow-same-origin"></iframe>
+  </div>`;
+  host.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+function closeGraphPanel() {
+  const host = $('#gfPanelHost');
+  if (host) host.innerHTML = '';
 }
 
 async function loadSchedulerView() {

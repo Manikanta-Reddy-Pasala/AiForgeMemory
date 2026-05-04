@@ -168,22 +168,29 @@ Browser tabs:
 - **Repo** — file list + summaries + services for a repo; click any file → symbols + chunks
 - **Memory** — Decision/Observation/Note/Doc nodes per repo
 - **Links** — `CALLS_REPO` edges with evidence
+- **Graph** — browse `graphify-out/` knowledge graphs for any repo that has been processed by [graphify](https://github.com/graphify/) — shows node count, size, last-updated; per row: open `GRAPH_REPORT.md` (rendered), `graph.json` (raw download), or the markdown wiki inline
 - **Scheduler** — daemon pid + per-repo last_run / status / errors
 
 Endpoints (curl-friendly):
 
 ```
-GET  /                       HTML dashboard
-GET  /api/repos              repo list + counts
-GET  /api/repo/{name}        meta + services + file list (200 newest)
-GET  /api/file?repo=&path=   file meta + symbols + chunks
-GET  /api/health             sidecar health snapshot
-GET  /api/scheduler          daemon status + per-repo journal
-GET  /api/memory?repo=&type= memory nodes
-GET  /api/links[?repo=]      CALLS_REPO edges
-POST /api/search             {query, repo} → ContextBundle
-GET  /docs                   OpenAPI / Swagger UI
+GET  /                                      HTML dashboard
+GET  /api/repos                             repo list + counts
+GET  /api/repo/{name}                       meta + services + file list (200 newest)
+GET  /api/file?repo=&path=                  file meta + symbols + chunks
+GET  /api/health                            sidecar health snapshot
+GET  /api/scheduler                         daemon status + per-repo journal
+GET  /api/memory?repo=&type=                memory nodes
+GET  /api/links[?repo=]                     CALLS_REPO edges
+POST /api/search                            {query, repo} → ContextBundle
+GET  /api/graphify                          repos with graphify-out (+ metadata)
+GET  /api/graphify/{repo}/report            raw GRAPH_REPORT.md
+GET  /api/graphify/{repo}/graph             graph.json (capped at 50 MB)
+GET  /graphify/{repo}/wiki/{path}           markdown/HTML wiki (path-jail enforced)
+GET  /docs                                  OpenAPI / Swagger UI
 ```
+
+**Graphify integration.** The `/api/graphify` endpoint walks every repo registered in `~/.aiforge/scheduler.yaml` plus the AIForgeCrew orchestrator dir, looks for a `graphify-out/` subdirectory, and returns metadata (`has_report`, `has_graph_json`, `has_wiki`, `node_count` parsed from `graph.json`, `size_kb`, `updated_at`). The wiki route only serves files under `<repo>/graphify-out/wiki/` — paths that escape the subtree are rejected with 400. To populate a graphify-out for a repo, run `graphify update .` from the repo root (see the [graphify](https://github.com/graphify/) skill).
 
 ---
 

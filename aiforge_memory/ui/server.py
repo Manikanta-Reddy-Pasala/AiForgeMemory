@@ -19,19 +19,186 @@ Requires fastapi + uvicorn (added to optional `[ui]` extra).
 """
 from __future__ import annotations
 
+import json
+import mimetypes
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Lazy-import fastapi so the rest of the package works without it.
 try:
     from fastapi import FastAPI, HTTPException, Query
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.responses import (
+        FileResponse,
+        HTMLResponse,
+        JSONResponse,
+        PlainTextResponse,
+        Response,
+    )
     _HAS_FASTAPI = True
 except ImportError:
     _HAS_FASTAPI = False
 
 
 HTML_PATH = Path(__file__).parent / "index.html"
+
+# Cap on /api/graphify/{repo}/graph payload — anything bigger and the JSON
+# materialisation stalls the UI. Operator should download graph.json directly.
+_GRAPHIFY_JSON_CAP_BYTES = 50 * 1024 * 1024
+
+
+def _graphify_extra_roots() -> list[Path]:
+    """Repos that aren't in scheduler.yaml but should still be surfaced.
+
+    AIForgeCrew (the orchestrator) keeps its own graphify-out beside the
+    AiForgeMemory checkout — so the UI can browse the meta-graph even
+    before the orchestrator repo is registered for ingest.
+    """
+    candidates = [
+        Path.home() / "AIForgeCrew",
+        Path.home() / "Documents" / "codeRepo" / "AIForgeCrew",
+        Path.home() / "codeRepo" / "AIForgeCrew",
+    ]
+    seen: set[str] = set()
+    out: list[Path] = []
+    for c in candidates:
+        if c.is_dir() and (c / "graphify-out").is_dir():
+            key = str(c.resolve())
+            if key not in seen:
+                seen.add(key)
+                out.append(c)
+    return out
+
+
+def _graphify_metadata(repo_name: str, repo_path: Path) -> dict | None:
+    """Inspect <repo_path>/graphify-out/ and return descriptor, or None.
+
+    Cheap stat-only walk — no file content parsed beyond graph.json's nodes
+    array (read once, length only). Resilient to partial outputs.
+    """
+    gdir = repo_path / "graphify-out"
+    if not gdir.is_dir():
+        return None
+
+    report = gdir / "GRAPH_REPORT.md"
+    graph_json = gdir / "graph.json"
+    wiki_md = gdir / "wiki" / "index.md"
+    wiki_html = gdir / "wiki" / "index.html"
+
+    has_report = report.is_file()
+    has_graph_json = graph_json.is_file()
+    has_wiki = wiki_md.is_file() or wiki_html.is_file()
+
+    node_count = 0
+    if has_graph_json:
+        try:
+            with graph_json.open("r", encoding="utf-8") as fh:
+                doc = json.load(fh)
+            nodes = doc.get("nodes")
+            if isinstance(nodes, list):
+                node_count = len(nodes)
+        except (OSError, ValueError):
+            node_count = 0
+
+    # Total bytes (recursive) — cheap because graphify-out is typically <100MB.
+    total_bytes = 0
+    for p in gdir.rglob("*"):
+        try:
+            if p.is_file():
+                total_bytes += p.stat().st_size
+        except OSError:
+            continue
+
+    # mtime preference: graph.json → GRAPH_REPORT.md → directory.
+    mtime_src: Path | None = None
+    if has_graph_json:
+        mtime_src = graph_json
+    elif has_report:
+        mtime_src = report
+    else:
+        mtime_src = gdir
+    try:
+        mt = mtime_src.stat().st_mtime
+        updated_at = datetime.fromtimestamp(mt, tz=UTC) \
+            .isoformat(timespec="seconds").replace("+00:00", "Z")
+    except OSError:
+        updated_at = ""
+
+    return {
+        "repo": repo_name,
+        "path": str(gdir),
+        "has_report": has_report,
+        "has_graph_json": has_graph_json,
+        "has_wiki": has_wiki,
+        "node_count": node_count,
+        "size_kb": total_bytes // 1024,
+        "updated_at": updated_at,
+    }
+
+
+def _graphify_index() -> dict[str, dict]:
+    """Discover all repos with a graphify-out dir.
+
+    Sources (deduped by repo name, scheduler entries take precedence):
+      1. ~/.aiforge/scheduler.yaml registered repos
+      2. Hard-coded extra roots (AIForgeCrew orchestrator)
+
+    Returns a {name: descriptor} mapping. The descriptor's `path` field is
+    the absolute path of `<repo>/graphify-out/` — the only directory the
+    HTTP layer is allowed to serve from.
+    """
+    out: dict[str, dict] = {}
+
+    # 1. Scheduler-registered repos.
+    try:
+        from aiforge_memory.ingest import scheduler as sched
+        cfg = sched.SchedulerConfig.load()
+        for r in cfg.repos:
+            try:
+                rp = Path(r.path).expanduser()
+            except (TypeError, ValueError):
+                continue
+            md = _graphify_metadata(r.name, rp)
+            if md:
+                out[r.name] = md
+    except Exception:  # noqa: BLE001 — scheduler import is best-effort
+        pass
+
+    # 2. AIForgeCrew (orchestrator self-graph).
+    for extra in _graphify_extra_roots():
+        if "AIForgeCrew" in out:
+            continue
+        md = _graphify_metadata("AIForgeCrew", extra)
+        if md:
+            out["AIForgeCrew"] = md
+
+    return out
+
+
+def _resolve_graphify_path(repo: str, *parts: str) -> Path:
+    """Resolve a path inside <repo>/graphify-out/ with traversal protection.
+
+    Raises HTTPException(404) for unknown repos and HTTPException(400) for
+    any path that escapes the graphify-out subtree (e.g. `..` segments,
+    absolute paths, symlinks aimed outside).
+    """
+    idx = _graphify_index()
+    desc = idx.get(repo)
+    if not desc:
+        raise HTTPException(404, f"unknown graphify repo: {repo}")
+    base = Path(desc["path"]).resolve()
+    if not parts:
+        return base
+    # Reject obvious escape attempts before resolve() collapses them.
+    for p in parts:
+        if not p or p.startswith("/") or ".." in Path(p).parts:
+            raise HTTPException(400, "invalid path")
+    target = (base.joinpath(*parts)).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(400, "path escapes graphify-out") from exc
+    return target
 
 
 def build_app():
@@ -255,6 +422,78 @@ def build_app():
             return link_writer.list_edges(drv, repo=repo)
         finally:
             drv.close()
+
+    # ── Graphify (browse graphify-out HTML knowledge graphs) ─────────
+
+    @app.get("/api/graphify")
+    async def graphify_list():
+        """All repos that have a graphify-out/ directory.
+
+        Walks scheduler.yaml + the AIForgeCrew orchestrator dir, returning
+        {repo, path, has_report, has_graph_json, has_wiki, node_count,
+         size_kb, updated_at} per entry.
+        """
+        idx = _graphify_index()
+        return sorted(idx.values(), key=lambda d: d["repo"].lower())
+
+    @app.get("/api/graphify/{repo}/report")
+    async def graphify_report(repo: str):
+        target = _resolve_graphify_path(repo, "GRAPH_REPORT.md")
+        if not target.is_file():
+            raise HTTPException(404, f"GRAPH_REPORT.md missing for {repo}")
+        return PlainTextResponse(
+            target.read_text(encoding="utf-8", errors="replace"),
+            media_type="text/markdown; charset=utf-8",
+        )
+
+    @app.get("/api/graphify/{repo}/graph")
+    async def graphify_graph(repo: str):
+        target = _resolve_graphify_path(repo, "graph.json")
+        if not target.is_file():
+            raise HTTPException(404, f"graph.json missing for {repo}")
+        try:
+            size = target.stat().st_size
+        except OSError as exc:
+            raise HTTPException(500, f"graph.json stat failed: {exc}") from exc
+        if size > _GRAPHIFY_JSON_CAP_BYTES:
+            raise HTTPException(
+                413,
+                f"graph.json is {size // (1024*1024)} MB (cap "
+                f"{_GRAPHIFY_JSON_CAP_BYTES // (1024*1024)} MB). "
+                f"Download directly from {target} on the host.",
+            )
+        # Stream raw bytes — don't re-serialise; preserves whatever ordering
+        # graphify wrote (callers may rely on `nodes`/`links` adjacency).
+        return Response(
+            content=target.read_bytes(),
+            media_type="application/json",
+        )
+
+    @app.get("/graphify/{repo}/wiki/{wiki_path:path}")
+    async def graphify_wiki(repo: str, wiki_path: str):
+        # Empty path (`/graphify/{repo}/wiki/`) → default to index.md/.html.
+        if not wiki_path or wiki_path.endswith("/"):
+            wiki_path = (wiki_path or "") + "index.md"
+        target = _resolve_graphify_path(repo, "wiki", *wiki_path.split("/"))
+        # Allow falling back to .html if .md was requested but only .html exists
+        # (or vice versa). Operators can switch generators without breaking links.
+        if not target.is_file():
+            if target.suffix == ".md":
+                alt = target.with_suffix(".html")
+                if alt.is_file():
+                    target = alt
+            elif target.suffix == ".html":
+                alt = target.with_suffix(".md")
+                if alt.is_file():
+                    target = alt
+        if not target.is_file():
+            raise HTTPException(404, f"wiki file not found: {wiki_path}")
+        # Markdown should render as text/plain so the browser shows raw MD,
+        # letting the client choose to fetch+render. HTML renders inline.
+        media_type, _ = mimetypes.guess_type(target.name)
+        if target.suffix == ".md":
+            media_type = "text/markdown; charset=utf-8"
+        return FileResponse(target, media_type=media_type)
 
     # ── Mutations: add / remove / reindex ────────────────────────────
 
