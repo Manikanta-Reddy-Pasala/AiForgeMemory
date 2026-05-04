@@ -26,17 +26,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-from aiforge_memory.ingest import delta, flow, link, scheduler
+from aiforge_memory.features.delta import extract as delta
+from aiforge_memory.features.flow import runner as flow
+from aiforge_memory.features.link import extract as link
+from aiforge_memory.features.scheduler import runner as scheduler
 from aiforge_memory.ops import backup as ops_backup
 from aiforge_memory.ops import health as ops_health
-from aiforge_memory.store import (
-    link_writer,
-    memory_writer,
-    schema,
-)
-from aiforge_memory.store import (
-    state_db as sdb,
-)
+from aiforge_memory.features.link import store as link_writer
+from aiforge_memory.features.memory import store as memory_writer
+from aiforge_memory.core import neo4j as schema
+from aiforge_memory.core import state as sdb
 
 
 def _driver():
@@ -135,10 +134,10 @@ def _cmd_summarise_symbols(args: argparse.Namespace) -> int:
     """Walk the repo's symbols, LLM-summarise non-trivial ones, write
     onto Symbol_v2.summary. No re-walk — uses on-disk source via
     treesitter_walk so this is safe to run after ingest."""
-    from aiforge_memory.ingest import scheduler as sched
-    from aiforge_memory.ingest import symbol_summary
-    from aiforge_memory.ingest import treesitter_walk
-    from aiforge_memory.store import symbol_summary_writer
+    from aiforge_memory.features.scheduler import runner as sched
+    from aiforge_memory.features.symbol import summarise as symbol_summary
+    from aiforge_memory.features.symbol import extract as treesitter_walk
+    from aiforge_memory.features.symbol import store_summary as symbol_summary_writer
 
     path = args.path
     if not path:
@@ -463,7 +462,7 @@ def _cmd_link_list(args: argparse.Namespace) -> int:
 # ─── Eval ─────────────────────────────────────────────────────────────
 
 def _cmd_eval(args: argparse.Namespace) -> int:
-    from aiforge_memory.eval import harness as ev
+    from aiforge_memory.features.eval import harness as ev
 
     drv = _driver()
     report = ev.run_eval(

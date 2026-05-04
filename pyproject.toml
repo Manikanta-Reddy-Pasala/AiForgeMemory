@@ -37,22 +37,25 @@ aiforge-memory = "aiforge_memory.api.cli:main"
 include = ["aiforge_memory*"]
 
 [tool.setuptools.package-data]
-"aiforge_memory.ingest" = ["prompts/*.txt", "queries/*.scm"]
+"aiforge_memory.features.repo" = ["prompts/*.txt"]
+"aiforge_memory.features.file" = ["prompts/*.txt"]
+"aiforge_memory.features.service" = ["prompts/*.txt"]
+"aiforge_memory.features.symbol" = ["prompts/*.txt", "queries/*.scm"]
 "aiforge_memory.ui" = ["index.html"]
-"aiforge_memory.eval" = ["*.yaml"]
+"aiforge_memory.features.eval" = ["*.yaml"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 extend-exclude = [
-  "aiforge_memory/tests/**/fixtures/**",
+  "aiforge_memory/features/**/tests/fixtures/**",
 ]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
-testpaths = ["aiforge_memory/tests"]
+testpaths = ["aiforge_memory"]
 addopts = "-ra"
 markers = [
     "live_neo4j: requires Neo4j running at AIFORGE_NEO4J_URI",

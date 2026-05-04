@@ -151,7 +151,7 @@ def _graphify_index() -> dict[str, dict]:
 
     # 1. Scheduler-registered repos.
     try:
-        from aiforge_memory.ingest import scheduler as sched
+        from aiforge_memory.features.scheduler import runner as sched
         cfg = sched.SchedulerConfig.load()
         for r in cfg.repos:
             try:
@@ -351,7 +351,7 @@ def build_app():
 
     @app.get("/api/scheduler")
     async def scheduler_status():
-        from aiforge_memory.ingest import scheduler as sched
+        from aiforge_memory.features.scheduler import runner as sched
         return JSONResponse(sched.daemon_status())
 
     @app.get("/api/health")
@@ -398,7 +398,7 @@ def build_app():
                                  pattern="^(decision|observation|note|doc)$"),
         limit: int = 50,
     ):
-        from aiforge_memory.store import memory_writer
+        from aiforge_memory.features.memory import store as memory_writer
         label_map = {
             "decision": "Decision_v2", "observation": "Observation_v2",
             "note": "Note_v2", "doc": "Doc_v2",
@@ -416,7 +416,7 @@ def build_app():
 
     @app.get("/api/links")
     async def links(repo: str | None = None):
-        from aiforge_memory.store import link_writer
+        from aiforge_memory.features.link import store as link_writer
         drv = _driver()
         try:
             return link_writer.list_edges(drv, repo=repo)
@@ -510,8 +510,8 @@ def build_app():
         """Run flow.ingest_repo in a daemon thread; track in _jobs."""
         import threading
         import time as _t
-        from aiforge_memory.ingest import flow
-        from aiforge_memory.store import state_db
+        from aiforge_memory.features.flow import runner as flow
+        from aiforge_memory.core import state as state_db
 
         jid = _job_id()
         _jobs[jid] = {
@@ -565,7 +565,7 @@ def build_app():
         """Register a new repo with the scheduler. Required: name, path.
         Optional knobs: interval_seconds, pull, skip_summaries, skip_chunks,
         use_lsp, timeout_seconds, per_file_seconds, skip_services."""
-        from aiforge_memory.ingest import scheduler as sched
+        from aiforge_memory.features.scheduler import runner as sched
         from pathlib import Path as _P
 
         name = (payload.get("name") or "").strip()
@@ -596,7 +596,7 @@ def build_app():
 
     @app.delete("/api/scheduler/{name}")
     async def scheduler_remove(name: str):
-        from aiforge_memory.ingest import scheduler as sched
+        from aiforge_memory.features.scheduler import runner as sched
         removed = sched.remove_repo(name)
         if not removed:
             raise HTTPException(404, f"no scheduled repo named {name}")
@@ -614,7 +614,7 @@ def build_app():
                                            field (set on first ingest)
         """
         from pathlib import Path as _P
-        from aiforge_memory.ingest import scheduler as sched
+        from aiforge_memory.features.scheduler import runner as sched
 
         name = (payload.get("name") or "").strip()
         if not name:
@@ -694,7 +694,7 @@ def build_app():
           purge=true (default)         drop graph nodes
           drop_schedule=true (default) remove from scheduler.yaml
         """
-        from aiforge_memory.ingest import scheduler as sched
+        from aiforge_memory.features.scheduler import runner as sched
 
         deleted = {"files": 0, "symbols": 0, "chunks": 0,
                    "memory": 0, "repo": 0}
