@@ -1,4 +1,9 @@
-"""L1 — CLI dispatch + doctor exit codes."""
+"""L1 — CLI dispatch + doctor exit codes.
+
+After the per-command split each subcommand owns its own module under
+``aiforge_memory.api.commands``; tests patch where each helper actually
+lives now (the package-level ``cli.py`` is just argparse wiring).
+"""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -14,9 +19,10 @@ def test_cli_ingest_subcommand_dispatches_to_flow(tmp_path, monkeypatch) -> None
     fake_driver = MagicMock()
     monkeypatch.setenv("AIFORGE_CODEMEM_STATE_DB", str(tmp_path / "state.db"))
 
-    with patch("aiforge_memory.api.cli._driver", return_value=fake_driver), \
-         patch("aiforge_memory.api.cli.flow.ingest_repo") as ingest, \
-         patch("aiforge_memory.api.cli.schema.apply"):
+    with patch("aiforge_memory.api.commands.ingest.driver",
+               return_value=fake_driver), \
+         patch("aiforge_memory.api.commands.ingest.flow.ingest_repo") as ingest, \
+         patch("aiforge_memory.api.commands.ingest.schema.apply"):
         ingest.return_value = type(
             "R", (), {"status": "indexed", "pack_sha": "sha", "repo": "rX"}
         )
@@ -26,17 +32,22 @@ def test_cli_ingest_subcommand_dispatches_to_flow(tmp_path, monkeypatch) -> None
 
 
 def test_cli_doctor_returns_0_when_all_green() -> None:
-    with patch("aiforge_memory.api.cli._check_repomix", return_value=(True, "ok")), \
-         patch("aiforge_memory.api.cli._check_neo4j", return_value=(True, "ok")), \
-         patch("aiforge_memory.api.cli._check_llm", return_value=(True, "ok")):
+    with patch("aiforge_memory.api.commands.doctor._check_repomix",
+               return_value=(True, "ok")), \
+         patch("aiforge_memory.api.commands.doctor._check_neo4j",
+               return_value=(True, "ok")), \
+         patch("aiforge_memory.api.commands.doctor._check_llm",
+               return_value=(True, "ok")):
         rc = cli.main(["doctor"])
     assert rc == 0
 
 
 def test_cli_doctor_returns_1_when_repomix_missing() -> None:
-    with patch("aiforge_memory.api.cli._check_repomix",
+    with patch("aiforge_memory.api.commands.doctor._check_repomix",
                return_value=(False, "missing")), \
-         patch("aiforge_memory.api.cli._check_neo4j", return_value=(True, "ok")), \
-         patch("aiforge_memory.api.cli._check_llm", return_value=(True, "ok")):
+         patch("aiforge_memory.api.commands.doctor._check_neo4j",
+               return_value=(True, "ok")), \
+         patch("aiforge_memory.api.commands.doctor._check_llm",
+               return_value=(True, "ok")):
         rc = cli.main(["doctor"])
     assert rc == 1
