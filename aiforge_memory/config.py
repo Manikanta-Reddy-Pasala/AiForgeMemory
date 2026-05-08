@@ -91,7 +91,7 @@ class RepoConfig:
         repo_path: str | Path,
         *,
         name: str | None = None,
-    ) -> "RepoConfig":
+    ) -> RepoConfig:
         """Load `.aiforge/codemem.yaml` from `repo_path`. Falls back to
         env vars + defaults for anything not set in the yaml.
 

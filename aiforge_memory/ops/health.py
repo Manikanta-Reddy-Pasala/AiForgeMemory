@@ -20,7 +20,6 @@ from pathlib import Path
 
 import httpx
 
-
 HEALTH_PATH = Path(
     os.environ.get(
         "AIFORGE_HEALTH_FILE",

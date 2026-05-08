@@ -7,7 +7,7 @@ import json
 from aiforge_memory.features.memory import store as memory_writer
 
 from ._driver import driver
-from .forget import _LABEL_MAP   # share the same type-to-label mapping
+from .forget import _LABEL_MAP  # share the same type-to-label mapping
 
 
 def run(args: argparse.Namespace) -> int:

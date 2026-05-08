@@ -4,9 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from aiforge_memory.core import state as sdb
 from aiforge_memory.features.flow import runner as flow
 from aiforge_memory.features.repo.extract import RepoSummary
-from aiforge_memory.core import state as sdb
 
 FIX = Path(__file__).parent / "fixtures"
 

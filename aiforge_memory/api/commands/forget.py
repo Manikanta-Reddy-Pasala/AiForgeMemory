@@ -8,7 +8,6 @@ from aiforge_memory.features.memory import store as memory_writer
 
 from ._driver import driver
 
-
 _LABEL_MAP = {
     "decision":    "Decision_v2",
     "observation": "Observation_v2",

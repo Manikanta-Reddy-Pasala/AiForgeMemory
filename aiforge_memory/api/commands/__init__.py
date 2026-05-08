@@ -8,9 +8,24 @@ argparse tree. Adding a new command = drop a file + one line in
 from __future__ import annotations
 
 from . import (
-    doctor, eval as eval_cmd, forget, health, ingest, install_hook, link,
-    list_memory, ops, recall, remember, schedule, services, stats,
-    summarise_symbols, ui,
+    doctor,
+    forget,
+    health,
+    ingest,
+    install_hook,
+    link,
+    list_memory,
+    ops,
+    recall,
+    remember,
+    schedule,
+    services,
+    stats,
+    summarise_symbols,
+    ui,
+)
+from . import (
+    eval as eval_cmd,
 )
 
 # Order = order they appear in `aiforge-memory --help`. Keep grouped:

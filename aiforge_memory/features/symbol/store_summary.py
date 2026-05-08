@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from aiforge_memory.features.symbol.summarise import SymbolSummary
 
-
 _UPSERT = """
 MATCH (s:Symbol_v2 {repo: $repo, fqname: $fqname})
 SET s.summary = $summary,

@@ -9,8 +9,8 @@ ingest set are pruned before re-inserting.
 """
 from __future__ import annotations
 
-from aiforge_memory.features.symbol.extract_calls import CallEdge
 from aiforge_memory.features.symbol.extract import WalkedFile
+from aiforge_memory.features.symbol.extract_calls import CallEdge
 
 _UPSERT_FILE = """
 MERGE (f:File_v2 {repo: $repo, path: $path})
