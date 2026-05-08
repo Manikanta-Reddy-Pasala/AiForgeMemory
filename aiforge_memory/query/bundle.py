@@ -11,6 +11,15 @@ from dataclasses import dataclass, field
 from aiforge_memory.query import fastpath, translator
 
 
+def _count_tokens(text: str) -> int:
+    """Exact tokens via tiktoken cl100k_base; chars/4 fallback if not installed."""
+    try:
+        import tiktoken
+        return len(tiktoken.get_encoding("cl100k_base").encode(text))
+    except ImportError:
+        return len(text) // 4
+
+
 @dataclass
 class ContextBundle:
     repo: str = ""
@@ -291,14 +300,18 @@ def query(
         if bundle.observations:
             bundle.sources_used.append("observations")
 
-    # Cross-repo edges originating or terminating at this repo
-    bundle.notes = _notes_for(driver, repo=repo, paths=anchor_paths, fqnames=anchor_syms)
-    bundle.docs = _docs_for(driver, repo=repo, paths=anchor_paths, fqnames=anchor_syms)
-
-    if bundle.notes:
-        bundle.sources_used.append("notes")
-    if bundle.docs:
-        bundle.sources_used.append("docs")
+    # Notes / Docs — only when anchors exist (MENTIONS edges to file/symbol)
+    if anchor_paths or anchor_syms:
+        bundle.notes = _notes_for(
+            driver, repo=repo, paths=anchor_paths, fqnames=anchor_syms,
+        )
+        bundle.docs = _docs_for(
+            driver, repo=repo, paths=anchor_paths, fqnames=anchor_syms,
+        )
+        if bundle.notes:
+            bundle.sources_used.append("notes")
+        if bundle.docs:
+            bundle.sources_used.append("docs")
 
     # Cross-repo edges originating or terminating at this repo
     bundle.cross_repo = _cross_repo_for(driver, repo=repo)
@@ -306,14 +319,6 @@ def query(
         bundle.sources_used.append("cross_repo")
 
     # Token budget — drop low-priority sections if over using exact token counts
-    def _count_tokens(text: str) -> int:
-        try:
-            import tiktoken
-            enc = tiktoken.get_encoding("cl100k_base")
-            return len(enc.encode(text))
-        except ImportError:
-            return len(text) // 4
-
     def _trim_to_budget():
         if _count_tokens(bundle.render()) <= token_budget:
             return
@@ -562,6 +567,8 @@ def _observations_for(
 def _notes_for(
     driver, *, repo: str, paths: list[str], fqnames: list[str], limit: int = 5,
 ) -> list[dict]:
+    if not paths and not fqnames:
+        return []
     cy = (
         "MATCH (n:Note_v2 {repo:$repo}) "
         "WHERE EXISTS { MATCH (n)-[:MENTIONS]->(f:File_v2 {repo:$repo}) "
@@ -575,14 +582,17 @@ def _notes_for(
     try:
         with driver.session() as s:
             return [dict(r) for r in s.run(
-                cy, repo=repo, paths=paths or [""], fqnames=fqnames or [""], limit=limit
+                cy, repo=repo, paths=paths, fqnames=fqnames, limit=limit,
             )]
     except Exception:
         return []
 
+
 def _docs_for(
     driver, *, repo: str, paths: list[str], fqnames: list[str], limit: int = 5,
 ) -> list[dict]:
+    if not paths and not fqnames:
+        return []
     cy = (
         "MATCH (d:Doc_v2 {repo:$repo}) "
         "WHERE EXISTS { MATCH (d)-[:MENTIONS]->(f:File_v2 {repo:$repo}) "
@@ -596,7 +606,7 @@ def _docs_for(
     try:
         with driver.session() as s:
             return [dict(r) for r in s.run(
-                cy, repo=repo, paths=paths or [""], fqnames=fqnames or [""], limit=limit
+                cy, repo=repo, paths=paths, fqnames=fqnames, limit=limit,
             )]
     except Exception:
         return []
