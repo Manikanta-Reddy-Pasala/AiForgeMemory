@@ -510,8 +510,9 @@ def build_app():
         """Run flow.ingest_repo in a daemon thread; track in _jobs."""
         import threading
         import time as _t
-        from aiforge_memory.features.flow import runner as flow
+
         from aiforge_memory.core import state as state_db
+        from aiforge_memory.features.flow import runner as flow
 
         jid = _job_id()
         _jobs[jid] = {
@@ -565,8 +566,9 @@ def build_app():
         """Register a new repo with the scheduler. Required: name, path.
         Optional knobs: interval_seconds, pull, skip_summaries, skip_chunks,
         use_lsp, timeout_seconds, per_file_seconds, skip_services."""
-        from aiforge_memory.features.scheduler import runner as sched
         from pathlib import Path as _P
+
+        from aiforge_memory.features.scheduler import runner as sched
 
         name = (payload.get("name") or "").strip()
         path = (payload.get("path") or "").strip()
@@ -614,6 +616,7 @@ def build_app():
                                            field (set on first ingest)
         """
         from pathlib import Path as _P
+
         from aiforge_memory.features.scheduler import runner as sched
 
         name = (payload.get("name") or "").strip()

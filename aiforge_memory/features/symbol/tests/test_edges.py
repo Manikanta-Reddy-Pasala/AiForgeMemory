@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aiforge_memory.features.symbol import extract_calls as edges
 from aiforge_memory.features.symbol import extract as tsw
+from aiforge_memory.features.symbol import extract_calls as edges
 
 FIX = Path(__file__).parent / "fixtures" / "poly_repo"
 

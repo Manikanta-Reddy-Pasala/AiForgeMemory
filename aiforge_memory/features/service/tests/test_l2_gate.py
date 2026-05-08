@@ -14,10 +14,10 @@ from unittest.mock import patch
 
 import pytest
 
-from aiforge_memory.features.flow import runner as flow
-from aiforge_memory.features.repo import extract as rs
 from aiforge_memory.core import neo4j as schema
 from aiforge_memory.core import state as sdb
+from aiforge_memory.features.flow import runner as flow
+from aiforge_memory.features.repo import extract as rs
 
 HERE = Path(__file__).parent
 FIX = HERE / "fixtures"

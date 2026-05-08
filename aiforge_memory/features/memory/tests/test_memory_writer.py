@@ -8,10 +8,10 @@ import os
 
 import pytest
 
-from aiforge_memory.features.repo.extract import RepoSummary
+from aiforge_memory.core import neo4j as schema
 from aiforge_memory.features.memory import store as memory_writer
 from aiforge_memory.features.repo import store as repo_writer
-from aiforge_memory.core import neo4j as schema
+from aiforge_memory.features.repo.extract import RepoSummary
 
 pytestmark = pytest.mark.live_neo4j
 

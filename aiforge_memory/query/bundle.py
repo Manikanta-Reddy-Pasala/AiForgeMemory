@@ -22,11 +22,13 @@ class ContextBundle:
     callers: list[dict] = field(default_factory=list)
     callees: list[dict] = field(default_factory=list)
     runbook_md: str = ""
+    repo_map: str = ""
     # Memory layer
     decisions: list[dict] = field(default_factory=list)
     observations: list[dict] = field(default_factory=list)
     # Cross-repo edges crossing this query's surface
     cross_repo: list[dict] = field(default_factory=list)
+    chunks: list[dict] = field(default_factory=list)
     sources_used: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -50,6 +52,19 @@ class ContextBundle:
 
         if self.runbook_md:
             out.append("## Runbook (top of repo)\n" + self.runbook_md[:2000])
+
+        if self.repo_map:
+            out.append("## Repo Map\n```\n" + self.repo_map + "\n```")
+
+        if self.chunks:
+            lines = ["## Relevant Code Chunks"]
+            for c in self.chunks[:5]:
+                # Compact output
+                path = c.get("file_path", "")
+                text = (c.get("text") or "").strip()
+                if path and text:
+                    lines.append(f"### `{path}`\n```\n{text}\n```")
+            out.append("\n".join(lines))
 
         if self.files:
             lines = ["## Anchor files"]
@@ -210,9 +225,22 @@ def query(
     if bundle.runbook_md:
         bundle.sources_used.append("runbook")
 
+    # Aider Repo Map
+    if file_paths:
+        bundle.repo_map = _repo_map_for(driver, repo=repo, focal_paths=file_paths)
+        if bundle.repo_map:
+            bundle.sources_used.append("repo_map")
+
     # Memory layer — decisions/observations linked to anchor files/symbols
+    # + Vector recall over observations
     anchor_paths = [f["path"] for f in bundle.files]
     anchor_syms = [s["fqname"] for s in bundle.symbols]
+    # Raw code chunks for focal files (Top 5 chunks)
+    if anchor_paths:
+        bundle.chunks = _chunks_for(driver, repo=repo, paths=anchor_paths[:3])
+        if bundle.chunks:
+            bundle.sources_used.append("chunks")
+
     if anchor_paths or anchor_syms:
         bundle.decisions = _decisions_for(
             driver, repo=repo, paths=anchor_paths, fqnames=anchor_syms,
@@ -220,6 +248,19 @@ def query(
         bundle.observations = _observations_for(
             driver, repo=repo, paths=anchor_paths, fqnames=anchor_syms,
         )
+
+        try:
+            vec = translator._embed_query(text)
+            if vec:
+                vec_obs = _vector_observations(driver, repo=repo, query_vec=vec)
+                # Deduplicate observations based on ID
+                existing_obs_ids = {o.get("id") for o in bundle.observations if o.get("id")}
+                for vo in vec_obs:
+                    if vo.get("id") not in existing_obs_ids:
+                        bundle.observations.append(vo)
+        except Exception as e:
+            bundle.errors.append(f"vector_observations: {e}")
+
         if bundle.decisions:
             bundle.sources_used.append("decisions")
         if bundle.observations:
@@ -230,16 +271,53 @@ def query(
     if bundle.cross_repo:
         bundle.sources_used.append("cross_repo")
 
-    # Token budget — drop low-priority sections if over (rough; chars≈4tok)
-    rendered = bundle.render()
-    char_budget = token_budget * 4
-    if len(rendered) > char_budget:
-        # drop callers/callees first
+    # Token budget — drop low-priority sections if over using exact token counts
+    def _count_tokens(text: str) -> int:
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+            return len(enc.encode(text))
+        except ImportError:
+            return len(text) // 4
+
+    def _trim_to_budget():
+        if _count_tokens(bundle.render()) <= token_budget:
+            return
+        # Priority 1: drop callers/callees
         bundle.callers = []
         bundle.callees = []
-        if len(bundle.render()) > char_budget:
-            bundle.symbols = bundle.symbols[:6]
-            bundle.files = bundle.files[:4]
+        if _count_tokens(bundle.render()) <= token_budget:
+            return
+
+        # Priority 2: drop cross-repo and decisions/observations
+        bundle.cross_repo = []
+        bundle.decisions = []
+        bundle.observations = []
+        if _count_tokens(bundle.render()) <= token_budget:
+            return
+
+        # Priority 3: trim chunks
+        bundle.chunks = bundle.chunks[:2]
+        if _count_tokens(bundle.render()) <= token_budget:
+            return
+
+        bundle.chunks = []
+        if _count_tokens(bundle.render()) <= token_budget:
+            return
+
+        # Priority 4: trim symbols and files
+        bundle.symbols = bundle.symbols[:6]
+        bundle.files = bundle.files[:4]
+        if _count_tokens(bundle.render()) <= token_budget:
+            return
+
+        # Priority 5: hard trim
+        bundle.symbols = []
+        bundle.files = []
+        bundle.services = []
+        bundle.runbook_md = bundle.runbook_md[:500]
+
+    _trim_to_budget()
 
     return bundle
 
@@ -328,6 +406,44 @@ def _runbook_for(driver, *, repo: str) -> str:
     return row["rb"] if row else ""
 
 
+def _repo_map_for(driver, *, repo: str, focal_paths: list[str]) -> str:
+    # Build a simple tree-like string of files and symbols for focal paths
+    cy = (
+        "MATCH (f:File_v2 {repo:$repo}) "
+        "WHERE f.path IN $paths "
+        "OPTIONAL MATCH (f)-[:DEFINES]->(s:Symbol_v2) "
+        "RETURN f.path AS path, collect(s.fqname) AS symbols"
+    )
+    try:
+        lines = []
+        with driver.session() as s:
+            for r in s.run(cy, repo=repo, paths=focal_paths):
+                path = r["path"]
+                lines.append(f"{path}:")
+                for sym in r["symbols"]:
+                    if sym:
+                        lines.append(f"  - {sym.split('::')[-1]}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _chunks_for(driver, *, repo: str, paths: list[str], limit: int = 5) -> list[dict]:
+    if not paths:
+        return []
+    cy = (
+        "MATCH (f:File_v2 {repo:$repo})-[:CHUNKED_AS]->(c:Chunk_v2) "
+        "WHERE f.path IN $paths "
+        "RETURN c.file_path AS file_path, c.text AS text "
+        "ORDER BY c.line_start ASC LIMIT $limit"
+    )
+    try:
+        with driver.session() as s:
+            return [dict(r) for r in s.run(cy, repo=repo, paths=paths, limit=limit)]
+    except Exception:
+        return []
+
+
 def _decisions_for(
     driver, *, repo: str, paths: list[str], fqnames: list[str], limit: int = 5,
 ) -> list[dict]:
@@ -355,6 +471,24 @@ def _decisions_for(
                 cy, repo=repo, paths=paths or [""],
                 fqnames=fqnames or [""], limit=limit,
             )]
+    except Exception:
+        return []
+
+
+def _vector_observations(
+    driver, *, repo: str, query_vec: list[float], k: int = 5,
+) -> list[dict]:
+    cy = (
+        "CALL db.index.vector.queryNodes('codemem_observation_embed', $k, $vec) "
+        "YIELD node AS o, score "
+        "WHERE o.repo = $repo "
+        "RETURN o.id AS id, coalesce(o.kind,'note') AS kind, "
+        "       o.text AS text, coalesce(o.tags,[]) AS tags, score "
+        "ORDER BY score DESC LIMIT $k"
+    )
+    try:
+        with driver.session() as s:
+            return [dict(r) for r in s.run(cy, repo=repo, vec=query_vec, k=k)]
     except Exception:
         return []
 

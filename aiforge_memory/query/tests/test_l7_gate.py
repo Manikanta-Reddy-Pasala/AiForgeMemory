@@ -13,12 +13,12 @@ from unittest.mock import patch
 
 import pytest
 
+from aiforge_memory.core import neo4j as schema
+from aiforge_memory.core import state as sdb
 from aiforge_memory.features.flow import runner as flow
 from aiforge_memory.features.repo import extract as rs
 from aiforge_memory.features.service.extract import ServiceDraft
 from aiforge_memory.query import bundle
-from aiforge_memory.core import neo4j as schema
-from aiforge_memory.core import state as sdb
 
 HERE = Path(__file__).parent
 POLY = HERE.parent.parent / "features" / "symbol" / "tests" / "fixtures" / "poly_repo"

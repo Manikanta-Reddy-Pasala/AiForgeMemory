@@ -15,9 +15,9 @@ from ._driver import driver
 
 def run(args: argparse.Namespace) -> int:
     from aiforge_memory.features.scheduler import runner as sched
-    from aiforge_memory.features.symbol import summarise as symbol_summary
     from aiforge_memory.features.symbol import extract as treesitter_walk
     from aiforge_memory.features.symbol import store_summary as symbol_summary_writer
+    from aiforge_memory.features.symbol import summarise as symbol_summary
 
     path = args.path
     if not path:

@@ -27,10 +27,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from aiforge_memory.features.symbol.extract_calls import CallEdge
 from aiforge_memory.features.lsp.adapters import adapter_for
 from aiforge_memory.features.lsp.client import LspClient, LspError, uri_to_path
 from aiforge_memory.features.symbol.extract import WalkedFile, WalkedSymbol
+from aiforge_memory.features.symbol.extract_calls import CallEdge
 
 # Symbol kinds that can be call targets
 _CALL_TARGET_KINDS = {"method", "function"}

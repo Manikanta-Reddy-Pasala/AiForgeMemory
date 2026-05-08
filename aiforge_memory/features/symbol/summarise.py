@@ -97,7 +97,7 @@ def summarise_symbols(
     repo_root: str | Path,
     limit: int | None = None,
     min_lines: int | None = None,
-    on_each: "callable | None" = None,
+    on_each: callable | None = None,
 ) -> list[SymbolSummary]:
     """One LLM call per qualifying symbol. Order: largest body first
     so the most expensive things land in the budget.
@@ -150,8 +150,8 @@ def summarise_symbols(
     if limit is not None:
         candidates = candidates[:max(0, int(limit))]
 
-    import time as _time
     import threading
+    import time as _time
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     out: list[SymbolSummary] = []
@@ -440,7 +440,7 @@ def _call_llm(
             # reasoning_content. Try content first, fall back.
             return (msg.get("content") or "").strip() \
                    or (msg.get("reasoning_content") or "").strip()
-        except (httpx.HTTPStatusError,):
+        except httpx.HTTPStatusError:
             raise  # 4xx — don't retry
         except Exception as exc:  # noqa: BLE001
             last_exc = exc

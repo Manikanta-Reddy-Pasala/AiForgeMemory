@@ -26,7 +26,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 STATE_DB = Path(
     os.environ.get(
         "AIFORGE_CODEMEM_STATE_DB",

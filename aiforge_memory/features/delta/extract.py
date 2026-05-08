@@ -28,17 +28,17 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from aiforge_memory.features.symbol import extract_calls as edges
-from aiforge_memory.features.chunk import embed as embed
-from aiforge_memory.features.file import extract as file_summary
-from aiforge_memory.features.git_meta import extract as git_meta
-from aiforge_memory.features.symbol import extract as treesitter_walk
-from aiforge_memory.features.flow.runner import IngestResult
-from aiforge_memory.features.chunk import store as chunk_writer
-from aiforge_memory.features.file import store as file_summary_writer
-from aiforge_memory.features.repo import store as repo_writer
-from aiforge_memory.features.symbol import store as symbol_writer
 from aiforge_memory.core import state as sdb
+from aiforge_memory.features.chunk import embed as embed
+from aiforge_memory.features.chunk import store as chunk_writer
+from aiforge_memory.features.file import extract as file_summary
+from aiforge_memory.features.file import store as file_summary_writer
+from aiforge_memory.features.flow.runner import IngestResult
+from aiforge_memory.features.git_meta import extract as git_meta
+from aiforge_memory.features.repo import store as repo_writer
+from aiforge_memory.features.symbol import extract as treesitter_walk
+from aiforge_memory.features.symbol import extract_calls as edges
+from aiforge_memory.features.symbol import store as symbol_writer
 
 
 @dataclass
