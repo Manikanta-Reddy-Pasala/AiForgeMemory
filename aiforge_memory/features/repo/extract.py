@@ -120,7 +120,8 @@ def _call_llm(pack_text: str, *, system: str = "", user: str = "") -> str:
         base_url=DEFAULT_LM_URL,
         api_key=os.environ.get("AIFORGE_CODEMEM_LM_KEY", "lm-studio"),
     )
-    resp = client.chat.completions.create(
+    from aiforge_memory.llm_compat import response_format
+    create_kwargs: dict = dict(
         model=DEFAULT_MODEL,
         messages=[
             {"role": "system", "content": system},
@@ -128,6 +129,9 @@ def _call_llm(pack_text: str, *, system: str = "", user: str = "") -> str:
         ],
         temperature=0.0,
         max_tokens=int(os.environ.get("AIFORGE_CODEMEM_REPO_SUMMARY_MAX_TOKENS", "8000")),
-        response_format={"type": "json_object"},
     )
+    rf = response_format()
+    if rf is not None:
+        create_kwargs["response_format"] = rf
+    resp = client.chat.completions.create(**create_kwargs)
     return resp.choices[0].message.content or ""
