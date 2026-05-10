@@ -46,9 +46,21 @@ def summarize(
     pack_text: str,
     *,
     repo_name: str,
-    max_input_chars: int = 240_000,
+    max_input_chars: int | None = None,
 ) -> RepoSummary:
-    """Pack → LLM → RepoSummary. Retries once on bad JSON."""
+    """Pack → LLM → RepoSummary. Retries once on bad JSON.
+
+    ``max_input_chars`` clamp size. None = read from
+    ``AIFORGE_CODEMEM_PACK_MAX_CHARS`` (default 240_000 = ~60K tokens
+    at 4 chars/token). Lower this when the LLM backend has a smaller
+    context window — LM Studio MLX with the 65K-token Qwen3-Coder
+    config wants ~180_000 chars to leave headroom for the system
+    prompt + JSON-schema overhead.
+    """
+    if max_input_chars is None:
+        max_input_chars = int(os.environ.get(
+            "AIFORGE_CODEMEM_PACK_MAX_CHARS", "240000",
+        ))
     pack = _truncate(pack_text, max_input_chars)
     system = PROMPT_PATH.read_text()
     user = f"Repository name: {repo_name}\n\n{pack}"
