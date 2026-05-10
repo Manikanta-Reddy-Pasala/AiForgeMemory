@@ -49,9 +49,16 @@ def extract_services(
     *,
     repo_path: str | Path,
     repo_name: str,
-    max_input_chars: int = 240_000,
+    max_input_chars: int | None = None,
 ) -> list[ServiceDraft]:
-    """Pack → LLM → drafts → operator override merge → validated drafts."""
+    """Pack → LLM → drafts → operator override merge → validated drafts.
+
+    ``max_input_chars`` clamp size. None = read from
+    ``AIFORGE_CODEMEM_PACK_MAX_CHARS`` (default 240_000)."""
+    if max_input_chars is None:
+        max_input_chars = int(os.environ.get(
+            "AIFORGE_CODEMEM_PACK_MAX_CHARS", "240000",
+        ))
     pack = _truncate(pack_text, max_input_chars)
     system = PROMPT_PATH.read_text()
     user = f"Repository name: {repo_name}\n\n{pack}"
