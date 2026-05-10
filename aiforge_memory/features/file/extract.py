@@ -131,7 +131,8 @@ def _call_llm(
     )
     system = system_override or PROMPT_PATH.read_text()
     user = f"File: {path}\nLanguage: {lang}\n\n{content}"
-    resp = client.chat.completions.create(
+    from aiforge_memory.llm_compat import response_format
+    create_kwargs: dict = dict(
         model=DEFAULT_MODEL,
         messages=[
             {"role": "system", "content": system},
@@ -139,6 +140,9 @@ def _call_llm(
         ],
         temperature=0.0,
         max_tokens=600,
-        response_format={"type": "json_object"},
     )
+    rf = response_format()
+    if rf is not None:
+        create_kwargs["response_format"] = rf
+    resp = client.chat.completions.create(**create_kwargs)
     return resp.choices[0].message.content or ""
