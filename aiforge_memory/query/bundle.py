@@ -523,6 +523,27 @@ def _decisions_for(
 def _vector_observations(
     driver, *, repo: str, query_vec: list[float], k: int = 5,
 ) -> list[dict]:
+    """Pull the bundle's vector-recalled observations.
+
+    Uses the PPR-lite reranker from
+    :func:`aiforge_memory.features.memory.store.recall_observations_ppr`
+    so an Observation_v2 that shares a ``:MENTIONS`` neighbour with the
+    seed (file/symbol) ranks alongside ones with high direct vector
+    similarity. Falls back to vanilla vector recall when the PPR query
+    fails (e.g. vector index missing on legacy installs)."""
+    try:
+        from aiforge_memory.features.memory.store import (
+            recall_observations_ppr,
+        )
+        rows = recall_observations_ppr(
+            driver, repo=repo, query_vec=query_vec,
+            k=k, seed_k=max(k * 3, 15), alpha=0.7,
+        )
+        if rows:
+            return rows
+    except Exception:
+        pass  # fall through to vanilla recall
+
     cy = (
         "CALL db.index.vector.queryNodes('codemem_observation_embed', $k, $vec) "
         "YIELD node AS o, score "

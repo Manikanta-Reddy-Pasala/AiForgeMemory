@@ -12,6 +12,7 @@ from . import (
     forget,
     health,
     ingest,
+    ingest_external,
     install_hook,
     link,
     list_memory,
@@ -32,6 +33,7 @@ from . import (
 # core ingest/inspect first, then memory CRUD, then cross-repo, then ops.
 COMMAND_MODULES = (
     ingest,
+    ingest_external,
     stats,
     summarise_symbols,
     services,
