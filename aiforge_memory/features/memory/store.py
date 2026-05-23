@@ -97,7 +97,8 @@ def upsert_decision(
 _UPSERT_OBSERVATION = """
 MERGE (o:Observation_v2 {id: $id})
 ON CREATE SET o.created_at     = datetime({epochSeconds: toInteger($now)}),
-              o.schema_version = $schema_version
+              o.schema_version = $schema_version,
+              o.seen_count     = 1
 SET o.repo        = $repo,
     o.kind        = $kind,
     o.text        = $text,
@@ -107,10 +108,49 @@ SET o.repo        = $repo,
     o.tags_text   = $tags_text,
     o.embed_vec   = $embed_vec,
     o.embed_model = $embed_model,
+    o.media_refs  = $media_refs,
+    o.event_time  = CASE
+        WHEN $event_time IS NULL
+        THEN datetime({epochSeconds: toInteger($now)})
+        ELSE datetime({epochSeconds: toInteger($event_time)})
+    END,
     o.updated_at  = datetime({epochSeconds: toInteger($now)})
 WITH o
 MATCH (r:Repo {name: $repo})
 MERGE (r)-[:RECORDS]->(o)
+RETURN o.id AS id
+"""
+
+
+# Exact-text dedupe lookup. Returns the existing Observation_v2 id when
+# the same repo already holds a node with identical text. We don't key
+# on tags/kind so a Learner that re-emits the same fact with a slightly
+# different tag set still collapses — losing tag drift is acceptable;
+# 3000 duplicate "README.md had 3 occurrences …" rows are not.
+_FIND_DUP_OBSERVATION = """
+MATCH (o:Observation_v2 {repo: $repo, text: $text})
+RETURN o.id AS id, coalesce(o.seen_count, 1) AS seen_count
+ORDER BY o.created_at ASC
+LIMIT 1
+"""
+
+
+_TOUCH_DUP_OBSERVATION = """
+MATCH (o:Observation_v2 {id: $id})
+SET o.seen_count   = coalesce(o.seen_count, 1) + 1,
+    o.last_seen_at = datetime({epochSeconds: toInteger($now)}),
+    o.tags         = apoc.coll.toSet(coalesce(o.tags, []) + $tags),
+    o.tags_text    = apoc.text.join(apoc.coll.toSet(coalesce(o.tags, []) + $tags), ' ')
+RETURN o.id AS id
+"""
+
+
+# Same lookup minus the APOC merge (APOC isn't installed on every Neo4j
+# Community deploy). We fall back to a plain timestamp+counter bump.
+_TOUCH_DUP_OBSERVATION_NO_APOC = """
+MATCH (o:Observation_v2 {id: $id})
+SET o.seen_count   = coalesce(o.seen_count, 1) + 1,
+    o.last_seen_at = datetime({epochSeconds: toInteger($now)})
 RETURN o.id AS id
 """
 
@@ -127,24 +167,78 @@ def upsert_observation(
     refs: list[str] | None = None,
     embed_vec: list[float] | None = None,
     embed_model: str = "bge-m3",
+    media_refs: list[str] | None = None,
+    event_time: float | None = None,
     id: str | None = None,
+    dedupe: bool = True,
 ) -> dict:
-    """Record an agent / human observation. Embed vector is optional —
-    when supplied, vector recall over Observation_v2 becomes available."""
-    nid = id or _new_id("obs")
+    """Record an agent / human observation.
+
+    When ``dedupe=True`` (default) and an existing Observation_v2 with
+    the same ``repo`` + ``text`` already exists, this returns the
+    existing node's id and bumps ``seen_count`` + ``last_seen_at``
+    instead of creating a duplicate. Pass ``dedupe=False`` to force a
+    new node (e.g. tests, or when the caller has already done its own
+    dedupe step).
+
+    Embed vector is optional — when supplied, vector recall over
+    Observation_v2 becomes available.
+
+    ``media_refs`` (gap-10): list of image / video / file paths or URLs
+    associated with the fact. Stored as a string array so a future
+    vision-embed pipeline can pick them up; today they just round-trip
+    so search results can surface "the fact mentioned screenshot X".
+
+    ``event_time`` (gap-7, bi-temporal): epoch seconds for the
+    real-world time the fact refers to, distinct from ``created_at``
+    (the ingest timestamp). Defaults to the ingest moment when not
+    supplied so old callers stay correct.
+    """
     tags = list(tags or [])
+    text = (text or "").strip()
+    media_refs = list(media_refs or [])
+
+    if dedupe and text:
+        with driver.session() as s:
+            existing = s.run(
+                _FIND_DUP_OBSERVATION, repo=repo, text=text,
+            ).single()
+            if existing is not None:
+                dup_id = existing["id"]
+                try:
+                    s.run(
+                        _TOUCH_DUP_OBSERVATION,
+                        id=dup_id, tags=tags, now=time.time(),
+                    ).consume()
+                except Exception:
+                    # APOC not loaded — fall back to plain touch.
+                    s.run(
+                        _TOUCH_DUP_OBSERVATION_NO_APOC,
+                        id=dup_id, now=time.time(),
+                    ).consume()
+                _link_refs(s, repo=repo, src_label="Observation_v2",
+                           src_id=dup_id, refs=refs or [])
+                return {
+                    "id": dup_id, "label": "Observation_v2",
+                    "deduped": True,
+                    "seen_count": (existing["seen_count"] or 1) + 1,
+                }
+
+    nid = id or _new_id("obs")
     params = {
         "id": nid, "repo": repo, "kind": kind, "text": text,
         "author": author, "session_id": session_id, "tags": tags,
         "tags_text": " ".join(tags),
         "embed_vec": embed_vec, "embed_model": embed_model,
+        "media_refs": media_refs,
+        "event_time": event_time,
         "schema_version": _SCHEMA_VERSION, "now": time.time(),
     }
     with driver.session() as s:
         s.run(_UPSERT_OBSERVATION, **params).consume()
         _link_refs(s, repo=repo, src_label="Observation_v2", src_id=nid,
                    refs=refs or [])
-    return {"id": nid, "label": "Observation_v2"}
+    return {"id": nid, "label": "Observation_v2", "deduped": False}
 
 
 # ─── Note ─────────────────────────────────────────────────────────────
@@ -299,6 +393,124 @@ def recall_observations(
     with driver.session() as s:
         return [dict(r) for r in s.run(
             _RECALL_OBSERVATION, repo=repo, vec=query_vec, k=k,
+        )]
+
+
+# Gap-6 (PPR-lite): personalized-PageRank-style rerank without
+# requiring the GDS plugin. Vector recall picks seeds; we then expand
+# 1-hop via :MENTIONS to neighbouring Files/Symbols and lift any
+# *other* Observation that points at the same neighbours, weighted by
+# overlap. Final score = ``$alpha * vector_score + (1-$alpha) *
+# overlap_score``, normalized to [0..1].
+#
+# Real PPR runs many damped iterations; this is 1 iteration with a
+# fixed teleport mass on the seed set. Adequate for "find observations
+# topologically near my seed" without dragging GDS in. Index migration
+# can swap to ``gds.pageRank.stream`` later — same return contract.
+_RECALL_OBSERVATIONS_PPR = """
+// 1. Vector recall over Observation_v2 → seed set with score.
+CALL db.index.vector.queryNodes('codemem_observation_embed', $seed_k, $vec)
+YIELD node AS seed_node, score AS vec_score
+WHERE seed_node.repo = $repo
+  AND (seed_node.status IS NULL OR seed_node.status = 'active')
+WITH collect({obs_id: seed_node.id, vec: vec_score}) AS seeds
+
+// 2. Re-fetch seeds as node bindings + carry vector score.
+UNWIND seeds AS s
+MATCH (seed:Observation_v2 {id: s.obs_id, repo: $repo})
+WITH seeds, seed, s.vec AS seed_vec
+
+// 3. 1-hop neighbours of every seed via :MENTIONS.
+OPTIONAL MATCH (seed)-[:MENTIONS]->(nbr)
+WHERE nbr:File_v2 OR nbr:Symbol_v2
+WITH seeds, collect(DISTINCT nbr) AS neighbour_set
+
+// 4. Find every Observation_v2 in the same repo that mentions at
+//    least one of those neighbours; count overlap per candidate.
+UNWIND neighbour_set AS n
+MATCH (cand:Observation_v2 {repo: $repo})-[:MENTIONS]->(n)
+WHERE (cand.status IS NULL OR cand.status = 'active')
+WITH seeds, cand, count(DISTINCT n) AS overlap
+
+// 5. Aggregate one row per candidate so we can normalize overlap.
+WITH seeds, cand, max(overlap) AS overlap
+
+// 6. Compute max_overlap across the candidate set so we can scale
+//    overlap into [0..1].
+WITH seeds, collect({cand: cand, overlap: overlap}) AS rows
+WITH seeds, rows,
+     reduce(m = 0, r IN rows |
+        CASE WHEN r.overlap > m THEN r.overlap ELSE m END) AS max_overlap
+
+// 7. Also gather every seed even if it had no MENTIONS neighbour,
+//    so direct vector hits without neighbours still show up.
+UNWIND seeds AS s
+OPTIONAL MATCH (seed_node:Observation_v2 {id: s.obs_id, repo: $repo})
+WITH rows, max_overlap, s.obs_id AS sid, s.vec AS sv, seed_node
+WITH rows, max_overlap,
+     collect({cand: seed_node, overlap: 0,
+              is_seed: true, vec: sv}) AS seed_rows
+WITH rows + seed_rows AS merged, max_overlap
+
+// 8. Score each candidate, picking the highest vector score across
+//    duplicates so seed appearances win over neighbour-only rows.
+UNWIND merged AS m
+WITH m.cand AS cand, m.overlap AS overlap, max_overlap,
+     coalesce(m.vec, 0.0) AS vec
+WHERE cand IS NOT NULL
+WITH cand,
+     max(vec) AS direct_vec,
+     max(overlap) AS overlap,
+     max_overlap
+WITH cand, direct_vec,
+     CASE WHEN max_overlap = 0 THEN 0.0
+          ELSE toFloat(overlap) / toFloat(max_overlap) END AS overlap_norm
+WITH cand,
+     ($alpha * direct_vec) +
+     ((1.0 - $alpha) * overlap_norm) AS ppr_score,
+     direct_vec, overlap_norm
+
+RETURN cand.id AS id,
+       cand.text AS text,
+       cand.kind AS kind,
+       coalesce(cand.tags, []) AS tags,
+       ppr_score AS score,
+       direct_vec AS vec_score,
+       overlap_norm AS overlap_score
+ORDER BY ppr_score DESC
+LIMIT $k
+"""
+
+
+def recall_observations_ppr(
+    driver, *, repo: str, query_vec: list[float],
+    k: int = 10, seed_k: int = 25, alpha: float = 0.6,
+) -> list[dict]:
+    """Vector recall + 1-iteration personalized-PageRank rerank.
+
+    Args:
+        repo: scope all reads to one repo.
+        query_vec: 1024-d bge-m3 vector.
+        k: number of results to return.
+        seed_k: vector-recall fan-in before graph rerank.
+        alpha: ``score = alpha * vec_score + (1 - alpha) *
+            overlap_score``. ``alpha=1.0`` collapses to vanilla
+            vector recall; ``alpha=0.0`` ranks purely by neighbour
+            overlap (rarely what you want).
+
+    Returns a list of ``{id, text, kind, tags, score, vec_score,
+    overlap_score}`` dicts ordered by descending blended score.
+    Empty ``query_vec`` returns ``[]``.
+
+    See :sql:`_RECALL_OBSERVATIONS_PPR` for the Cypher implementation.
+    """
+    if not query_vec:
+        return []
+    with driver.session() as s:
+        return [dict(r) for r in s.run(
+            _RECALL_OBSERVATIONS_PPR,
+            repo=repo, vec=query_vec,
+            seed_k=seed_k, k=k, alpha=float(alpha),
         )]
 
 

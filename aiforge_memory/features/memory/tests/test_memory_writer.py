@@ -127,6 +127,139 @@ def test_observation_links_symbol_via_mentions(driver) -> None:
     assert row["fq"] == "foo.bar.Baz::run"
 
 
+def test_observation_dedupe_collapses_same_text(driver) -> None:
+    """Same repo + same text → return the existing node id with
+    deduped=True and seen_count bumped. The pre-dedupe implementation
+    created a fresh Observation_v2 every Learner fire, drowning
+    queries in restated facts."""
+    text = "Pipeline restart wipes ipython kernel sessions."
+    a = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo", text=text, kind="gotcha",
+        tags=["runtime"],
+    )
+    assert a["deduped"] is False
+
+    b = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo", text=text, kind="gotcha",
+        tags=["runtime", "extra"],
+    )
+    assert b["deduped"] is True
+    assert b["id"] == a["id"]
+    assert b["seen_count"] >= 2
+
+    # Different text → fresh node, not deduped.
+    c = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo", text=text + " v2", kind="gotcha",
+    )
+    assert c["deduped"] is False
+    assert c["id"] != a["id"]
+
+
+def test_observation_dedupe_can_be_disabled(driver) -> None:
+    text = "Force-create branch for the test path."
+    a = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo", text=text,
+    )
+    b = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo", text=text, dedupe=False,
+    )
+    assert a["id"] != b["id"]
+    assert b["deduped"] is False
+
+
+def test_observation_records_media_refs_and_event_time(driver) -> None:
+    """Gap-10 + gap-7: ``media_refs`` round-trips and ``event_time``
+    is stored separately from ``created_at`` so bi-temporal queries
+    can distinguish "when the fact refers to" from "when we ingested
+    it"."""
+    out = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo",
+        text="screenshot from an old user report",
+        kind="bug",
+        media_refs=[
+            "/var/uploads/2025-01-01/screen-001.png",
+            "/var/uploads/2025-01-01/screen-002.png",
+        ],
+        event_time=1735689600.0,  # 2025-01-01 00:00 UTC
+    )
+    assert out["label"] == "Observation_v2"
+    with driver.session() as s:
+        row = s.run(
+            "MATCH (o:Observation_v2 {id:$id}) "
+            "RETURN o.media_refs AS media, o.event_time AS et, "
+            "       o.created_at AS ct",
+            id=out["id"],
+        ).single()
+    assert list(row["media"]) == [
+        "/var/uploads/2025-01-01/screen-001.png",
+        "/var/uploads/2025-01-01/screen-002.png",
+    ]
+    assert row["et"] is not None
+    # event_time should be the 2025 date we asked for, not the ingest
+    # moment (which is "now").
+    assert str(row["et"]).startswith("2025-")
+    assert row["ct"] is not None
+    assert row["et"] != row["ct"]
+
+
+def test_observation_event_time_defaults_to_now(driver) -> None:
+    out = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo",
+        text="fact with no explicit event_time",
+    )
+    with driver.session() as s:
+        row = s.run(
+            "MATCH (o:Observation_v2 {id:$id}) "
+            "RETURN o.event_time AS et, o.created_at AS ct",
+            id=out["id"],
+        ).single()
+    # When caller doesn't supply event_time we fall back to ingest
+    # timestamp so old callers stay correct without a migration.
+    assert row["et"] is not None
+    assert str(row["et"])[:4] == str(row["ct"])[:4]
+
+
+def test_recall_observations_ppr_blends_vector_and_overlap(driver) -> None:
+    """Gap-6: PPR-lite reranker. Vector recall finds the seed
+    Observation; the rerank then surfaces a *different* Observation
+    that shares a :MENTIONS neighbour with the seed."""
+    base_vec = [0.0] * 1024
+    base_vec[0] = 1.0
+    # Two observations mention the same Symbol_v2:
+    #   seed_obs has high vec sim to the query
+    #   peer_obs has low vec sim but shares a symbol neighbour
+    seed = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo",
+        text="ppr_seed: race condition in foo.bar.Baz::run",
+        refs=["foo.bar.Baz::run"],
+        embed_vec=base_vec,
+    )
+    distant_vec = [0.0] * 1024
+    distant_vec[10] = 1.0
+    peer = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo",
+        text="ppr_peer: also touches foo.bar.Baz::run from another angle",
+        refs=["foo.bar.Baz::run"],
+        embed_vec=distant_vec,
+    )
+    rows = memory_writer.recall_observations_ppr(
+        driver, repo="test_mem_repo",
+        query_vec=base_vec, k=10, seed_k=10, alpha=0.5,
+    )
+    ids = [r["id"] for r in rows]
+    # The seed itself must rank highly because it has direct vec sim.
+    assert seed["id"] in ids
+    # The peer must surface despite low vec sim because it shares a
+    # symbol neighbour — pure vector recall would miss it at
+    # ``alpha=0.5``.
+    assert peer["id"] in ids
+    seed_row = next(r for r in rows if r["id"] == seed["id"])
+    peer_row = next(r for r in rows if r["id"] == peer["id"])
+    # Each row exposes the component scores for debuggability.
+    assert "vec_score" in seed_row
+    assert "overlap_score" in peer_row
+
+
 def test_observation_with_vector_index(driver) -> None:
     """Observation_v2 with embed_vec should be retrievable via the
     vector index. Uses a stub 1024d embedding."""
