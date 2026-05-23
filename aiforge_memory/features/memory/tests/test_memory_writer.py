@@ -127,6 +127,46 @@ def test_observation_links_symbol_via_mentions(driver) -> None:
     assert row["fq"] == "foo.bar.Baz::run"
 
 
+def test_observation_dedupe_collapses_same_text(driver) -> None:
+    """Same repo + same text → return the existing node id with
+    deduped=True and seen_count bumped. The pre-dedupe implementation
+    created a fresh Observation_v2 every Learner fire, drowning
+    queries in restated facts."""
+    text = "Pipeline restart wipes ipython kernel sessions."
+    a = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo", text=text, kind="gotcha",
+        tags=["runtime"],
+    )
+    assert a["deduped"] is False
+
+    b = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo", text=text, kind="gotcha",
+        tags=["runtime", "extra"],
+    )
+    assert b["deduped"] is True
+    assert b["id"] == a["id"]
+    assert b["seen_count"] >= 2
+
+    # Different text → fresh node, not deduped.
+    c = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo", text=text + " v2", kind="gotcha",
+    )
+    assert c["deduped"] is False
+    assert c["id"] != a["id"]
+
+
+def test_observation_dedupe_can_be_disabled(driver) -> None:
+    text = "Force-create branch for the test path."
+    a = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo", text=text,
+    )
+    b = memory_writer.upsert_observation(
+        driver, repo="test_mem_repo", text=text, dedupe=False,
+    )
+    assert a["id"] != b["id"]
+    assert b["deduped"] is False
+
+
 def test_observation_with_vector_index(driver) -> None:
     """Observation_v2 with embed_vec should be retrievable via the
     vector index. Uses a stub 1024d embedding."""

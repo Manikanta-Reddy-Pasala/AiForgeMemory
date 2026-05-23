@@ -97,7 +97,8 @@ def upsert_decision(
 _UPSERT_OBSERVATION = """
 MERGE (o:Observation_v2 {id: $id})
 ON CREATE SET o.created_at     = datetime({epochSeconds: toInteger($now)}),
-              o.schema_version = $schema_version
+              o.schema_version = $schema_version,
+              o.seen_count     = 1
 SET o.repo        = $repo,
     o.kind        = $kind,
     o.text        = $text,
@@ -115,6 +116,39 @@ RETURN o.id AS id
 """
 
 
+# Exact-text dedupe lookup. Returns the existing Observation_v2 id when
+# the same repo already holds a node with identical text. We don't key
+# on tags/kind so a Learner that re-emits the same fact with a slightly
+# different tag set still collapses — losing tag drift is acceptable;
+# 3000 duplicate "README.md had 3 occurrences …" rows are not.
+_FIND_DUP_OBSERVATION = """
+MATCH (o:Observation_v2 {repo: $repo, text: $text})
+RETURN o.id AS id, coalesce(o.seen_count, 1) AS seen_count
+ORDER BY o.created_at ASC
+LIMIT 1
+"""
+
+
+_TOUCH_DUP_OBSERVATION = """
+MATCH (o:Observation_v2 {id: $id})
+SET o.seen_count   = coalesce(o.seen_count, 1) + 1,
+    o.last_seen_at = datetime({epochSeconds: toInteger($now)}),
+    o.tags         = apoc.coll.toSet(coalesce(o.tags, []) + $tags),
+    o.tags_text    = apoc.text.join(apoc.coll.toSet(coalesce(o.tags, []) + $tags), ' ')
+RETURN o.id AS id
+"""
+
+
+# Same lookup minus the APOC merge (APOC isn't installed on every Neo4j
+# Community deploy). We fall back to a plain timestamp+counter bump.
+_TOUCH_DUP_OBSERVATION_NO_APOC = """
+MATCH (o:Observation_v2 {id: $id})
+SET o.seen_count   = coalesce(o.seen_count, 1) + 1,
+    o.last_seen_at = datetime({epochSeconds: toInteger($now)})
+RETURN o.id AS id
+"""
+
+
 def upsert_observation(
     driver,
     *,
@@ -128,11 +162,50 @@ def upsert_observation(
     embed_vec: list[float] | None = None,
     embed_model: str = "bge-m3",
     id: str | None = None,
+    dedupe: bool = True,
 ) -> dict:
-    """Record an agent / human observation. Embed vector is optional —
-    when supplied, vector recall over Observation_v2 becomes available."""
-    nid = id or _new_id("obs")
+    """Record an agent / human observation.
+
+    When ``dedupe=True`` (default) and an existing Observation_v2 with
+    the same ``repo`` + ``text`` already exists, this returns the
+    existing node's id and bumps ``seen_count`` + ``last_seen_at``
+    instead of creating a duplicate. Pass ``dedupe=False`` to force a
+    new node (e.g. tests, or when the caller has already done its own
+    dedupe step).
+
+    Embed vector is optional — when supplied, vector recall over
+    Observation_v2 becomes available.
+    """
     tags = list(tags or [])
+    text = (text or "").strip()
+
+    if dedupe and text:
+        with driver.session() as s:
+            existing = s.run(
+                _FIND_DUP_OBSERVATION, repo=repo, text=text,
+            ).single()
+            if existing is not None:
+                dup_id = existing["id"]
+                try:
+                    s.run(
+                        _TOUCH_DUP_OBSERVATION,
+                        id=dup_id, tags=tags, now=time.time(),
+                    ).consume()
+                except Exception:
+                    # APOC not loaded — fall back to plain touch.
+                    s.run(
+                        _TOUCH_DUP_OBSERVATION_NO_APOC,
+                        id=dup_id, now=time.time(),
+                    ).consume()
+                _link_refs(s, repo=repo, src_label="Observation_v2",
+                           src_id=dup_id, refs=refs or [])
+                return {
+                    "id": dup_id, "label": "Observation_v2",
+                    "deduped": True,
+                    "seen_count": (existing["seen_count"] or 1) + 1,
+                }
+
+    nid = id or _new_id("obs")
     params = {
         "id": nid, "repo": repo, "kind": kind, "text": text,
         "author": author, "session_id": session_id, "tags": tags,
@@ -144,7 +217,7 @@ def upsert_observation(
         s.run(_UPSERT_OBSERVATION, **params).consume()
         _link_refs(s, repo=repo, src_label="Observation_v2", src_id=nid,
                    refs=refs or [])
-    return {"id": nid, "label": "Observation_v2"}
+    return {"id": nid, "label": "Observation_v2", "deduped": False}
 
 
 # ─── Note ─────────────────────────────────────────────────────────────
