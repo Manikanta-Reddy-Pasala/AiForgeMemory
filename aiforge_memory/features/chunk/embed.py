@@ -9,7 +9,11 @@ Soft contract:
     - sidecar 5xx / unreachable → skip file silently, increment counter
     - file too large → skip with reason 'too_large'
 
-Sidecar URL via AIFORGE_EMBED_URL (default http://127.0.0.1:8764).
+Embedding model/sidecar are pluggable via env (see ``embed_config``):
+    AIFORGE_EMBED_MODEL  (default "bge-m3")
+    AIFORGE_EMBED_URL    (default http://127.0.0.1:8764)
+    AIFORGE_EMBED_DIM    (default 1024)
+Defaults reproduce the historical bge-m3 / 1024-d behaviour exactly.
 """
 from __future__ import annotations
 
@@ -22,6 +26,9 @@ import httpx
 
 from aiforge_memory.features.symbol.extract import WalkedFile
 
+# Historical defaults — kept as module constants for backward compat.
+DEFAULT_EMBED_MODEL = "bge-m3"
+DEFAULT_EMBED_DIM = 1024
 DEFAULT_EMBED_URL = os.environ.get("AIFORGE_EMBED_URL", "http://127.0.0.1:8764")
 MAX_FILE_BYTES = int(os.environ.get("AIFORGE_CODEMEM_EMBED_MAX_BYTES", "65536"))
 # Docs (markdown / rst / adoc / txt) get a bigger budget — CLAUDE.md
@@ -31,6 +38,19 @@ DOC_MAX_FILE_BYTES = int(os.environ.get("AIFORGE_CODEMEM_DOC_MAX_BYTES", "262144
 CHUNK_LINES = int(os.environ.get("AIFORGE_CODEMEM_CHUNK_LINES", "50"))
 DOC_CHUNK_LINES = int(os.environ.get("AIFORGE_CODEMEM_DOC_CHUNK_LINES", "60"))
 CHUNK_OVERLAP = int(os.environ.get("AIFORGE_CODEMEM_CHUNK_OVERLAP", "10"))
+
+
+def embed_config() -> dict:
+    """Resolve the embedding model/sidecar from env (read at call time).
+
+    Returns ``{"model", "url", "dim"}``. Defaults reproduce the historical
+    bge-m3 / 1024-d behaviour, so calling with no env set is a no-op change.
+    """
+    return {
+        "model": os.environ.get("AIFORGE_EMBED_MODEL", DEFAULT_EMBED_MODEL),
+        "url": os.environ.get("AIFORGE_EMBED_URL", DEFAULT_EMBED_URL),
+        "dim": int(os.environ.get("AIFORGE_EMBED_DIM", str(DEFAULT_EMBED_DIM))),
+    }
 
 
 @dataclass
@@ -195,9 +215,19 @@ def _chunk_id(repo: str, file_path: str, idx: int) -> str:
 
 
 def _embed(text: str) -> list[float]:
-    """Call /embed on the sidecar. Returns 1024-d vector."""
-    url = DEFAULT_EMBED_URL.rstrip("/") + "/embed"
-    r = httpx.post(url, json={"text": text}, timeout=15.0)
+    """Call /embed on the configured sidecar.
+
+    Model/URL/dim resolved via ``embed_config()`` (env-pluggable).
+    Wire protocol is unchanged for the bge-m3 default: POST {"text": ...} →
+    {"embedding"|"vector": [...]}. When a non-default model is configured,
+    the model name is forwarded so a multi-model sidecar can route on it.
+    """
+    cfg = embed_config()
+    url = cfg["url"].rstrip("/") + "/embed"
+    payload: dict = {"text": text}
+    if cfg["model"] != DEFAULT_EMBED_MODEL:
+        payload["model"] = cfg["model"]
+    r = httpx.post(url, json=payload, timeout=15.0)
     r.raise_for_status()
     data = r.json()
     vec = data.get("embedding") or data.get("vector") or []

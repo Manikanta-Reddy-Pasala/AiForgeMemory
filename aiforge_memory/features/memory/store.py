@@ -20,6 +20,8 @@ Observation embeddings.
 """
 from __future__ import annotations
 
+import math
+import re
 import time
 import uuid
 from collections.abc import Iterable
@@ -44,6 +46,7 @@ SET d.repo        = $repo,
     d.session_id  = $session_id,
     d.tags        = $tags,
     d.tags_text   = $tags_text,
+    d.confidence  = $confidence,
     d.updated_at  = datetime({epochSeconds: toInteger($now)})
 WITH d
 MATCH (r:Repo {name: $repo})
@@ -65,6 +68,7 @@ def upsert_decision(
     tags: list[str] | None = None,
     refs: list[str] | None = None,
     supersedes_id: str | None = None,
+    confidence: float = 1.0,
     id: str | None = None,
 ) -> dict:
     """Record a durable architectural / process decision."""
@@ -75,6 +79,7 @@ def upsert_decision(
         "rationale": rationale, "status": status, "author": author,
         "session_id": session_id, "tags": tags,
         "tags_text": " ".join(tags),
+        "confidence": _clamp01(confidence),
         "schema_version": _SCHEMA_VERSION, "now": time.time(),
     }
     with driver.session() as s:
@@ -109,6 +114,8 @@ SET o.repo        = $repo,
     o.embed_vec   = $embed_vec,
     o.embed_model = $embed_model,
     o.media_refs  = $media_refs,
+    o.confidence  = $confidence,
+    o.entities    = $entities,
     o.event_time  = CASE
         WHEN $event_time IS NULL
         THEN datetime({epochSeconds: toInteger($now)})
@@ -169,6 +176,7 @@ def upsert_observation(
     embed_model: str = "bge-m3",
     media_refs: list[str] | None = None,
     event_time: float | None = None,
+    confidence: float = 1.0,
     id: str | None = None,
     dedupe: bool = True,
     supersedes: list[str] | None = None,
@@ -232,12 +240,15 @@ def upsert_observation(
                 }
 
     nid = id or _new_id("obs")
+    entities = [e["value"] for e in extract_entities(text)]
     params = {
         "id": nid, "repo": repo, "kind": kind, "text": text,
         "author": author, "session_id": session_id, "tags": tags,
         "tags_text": " ".join(tags),
         "embed_vec": embed_vec, "embed_model": embed_model,
         "media_refs": media_refs,
+        "confidence": _clamp01(confidence),
+        "entities": entities,
         "event_time": event_time,
         "schema_version": _SCHEMA_VERSION, "now": time.time(),
     }
@@ -357,6 +368,45 @@ def forget(driver, *, repo: str, node_id: str, label: str) -> dict:
     return {"deleted": row["id"] if row else None}
 
 
+def soft_forget(driver, *, repo: str, node_id: str, label: str) -> dict:
+    """Soft-delete a memory node by flagging ``status='deleted'`` +
+    stamping ``deleted_at``, instead of the hard ``DETACH DELETE`` that
+    ``forget`` performs. The node + edges stay intact so it can be
+    ``restore``d, and vanilla recall (which only includes
+    ``status IS NULL OR status = 'active'``) drops it. ``label`` must be
+    one of Decision_v2, Observation_v2, Note_v2, Doc_v2."""
+    if label not in _ALLOWED_LABELS:
+        raise ValueError(f"unknown memory label: {label}")
+    cy = (
+        f"MATCH (n:{label} {{id:$id, repo:$repo}}) "
+        "SET n.status = 'deleted', "
+        "    n.deleted_at = datetime({epochSeconds: toInteger($now)}), "
+        "    n.updated_at = datetime({epochSeconds: toInteger($now)}) "
+        "RETURN n.id AS id"
+    )
+    with driver.session() as s:
+        row = s.run(cy, id=node_id, repo=repo, now=time.time()).single()
+    return {"soft_deleted": row["id"] if row else None}
+
+
+def restore(driver, *, repo: str, node_id: str, label: str) -> dict:
+    """Reverse a ``soft_forget`` — set ``status='active'`` and clear
+    ``deleted_at`` so the node re-enters recall. ``label`` must be one of
+    Decision_v2, Observation_v2, Note_v2, Doc_v2."""
+    if label not in _ALLOWED_LABELS:
+        raise ValueError(f"unknown memory label: {label}")
+    cy = (
+        f"MATCH (n:{label} {{id:$id, repo:$repo}}) "
+        "SET n.status = 'active', "
+        "    n.deleted_at = null, "
+        "    n.updated_at = datetime({epochSeconds: toInteger($now)}) "
+        "RETURN n.id AS id"
+    )
+    with driver.session() as s:
+        row = s.run(cy, id=node_id, repo=repo, now=time.time()).single()
+    return {"restored": row["id"] if row else None}
+
+
 def list_memory(
     driver, *, repo: str, label: str | None = None, limit: int = 50,
 ) -> list[dict]:
@@ -422,6 +472,33 @@ def recall_observations(
         return [dict(r) for r in s.run(
             _RECALL_OBSERVATION, repo=repo, vec=query_vec, k=k,
         )]
+
+
+def find_semantic_dup(
+    driver, *, repo: str, embed_vec: list[float] | None,
+    threshold: float = 0.92,
+) -> str | None:
+    """Vector-recall the single nearest Observation_v2 in ``repo`` and
+    return its id when the cosine score ``>= threshold``, else ``None``.
+
+    This lifts semantic dedupe into the core store so any caller (not
+    just the AIForgeCrew Learner) can collapse paraphrases before
+    writing a near-identical fact. Uses the same vector index path as
+    :func:`recall_observations` (``_RECALL_OBSERVATION``). Returns
+    ``None`` when no embed vector is supplied — never touches the
+    driver in that case."""
+    if not embed_vec:
+        return None
+    with driver.session() as s:
+        row = s.run(
+            _RECALL_OBSERVATION, repo=repo, vec=embed_vec, k=1,
+        ).single()
+    if row is None:
+        return None
+    score = row["score"]
+    if score is not None and score >= threshold:
+        return row["id"]
+    return None
 
 
 # Gap-6 (PPR-lite): personalized-PageRank-style rerank without
@@ -542,7 +619,128 @@ def recall_observations_ppr(
         )]
 
 
+# ─── M1: recency / importance-weighted rerank (pure) ──────────────────
+
+def rerank_by_recency(
+    rows: list[dict],
+    *,
+    now: float,
+    half_life_days: float = 30.0,
+    w_recency: float = 0.2,
+    w_conf: float = 0.1,
+) -> list[dict]:
+    """Re-rank recall ``rows`` blending raw relevance with recency and
+    confidence — a pure, driver-free post-processor callers apply on top
+    of any recall (``recall_observations`` / ``recall_observations_ppr``).
+
+    Each row is expected to carry ``score`` (relevance) and optionally
+    ``created_at_epoch`` (epoch seconds) + ``confidence`` (0..1). The new
+    score is::
+
+        final = score
+              + w_recency * exp(-age_days / half_life_days)
+              + w_conf    * (confidence - 1)
+
+    so fresher facts get a positive recency bump and low-confidence facts
+    get a (negative) penalty relative to a fully-trusted (conf=1) fact.
+    Rows missing ``created_at_epoch`` get no recency bonus; rows missing
+    ``confidence`` default to 1.0 (no penalty). Returns a new list of the
+    same dicts (each gains a ``final_score`` key) sorted descending."""
+    out: list[dict] = []
+    half = half_life_days if half_life_days > 0 else 1.0
+    for row in rows:
+        r = dict(row)
+        score = float(r.get("score") or 0.0)
+        created = r.get("created_at_epoch")
+        if created is not None:
+            age_days = max(0.0, (now - float(created)) / 86_400.0)
+            recency = math.exp(-age_days / half)
+        else:
+            recency = 0.0
+        conf = r.get("confidence")
+        conf = 1.0 if conf is None else float(conf)
+        final = score + w_recency * recency + w_conf * (conf - 1.0)
+        r["final_score"] = final
+        out.append(r)
+    out.sort(key=lambda d: d["final_score"], reverse=True)
+    return out
+
+
+# ─── M4: lightweight entity extraction (pure, regex KISS) ─────────────
+
+# Code-file extensions we treat a bare token as a "file" for even when it
+# has no slash (e.g. ``config.yaml``).
+_CODE_EXTS = (
+    "py", "java", "js", "ts", "tsx", "jsx", "go", "rs", "rb", "c", "h",
+    "cpp", "hpp", "cs", "kt", "scala", "swift", "php", "sql", "sh", "yaml",
+    "yml", "json", "toml", "xml", "html", "css", "md", "txt", "cfg", "ini",
+    "properties", "gradle", "lock", "env",
+)
+
+_RE_URL = re.compile(r"https?://[^\s<>\"')]+")
+_RE_TICKET = re.compile(r"\b[A-Z]{2,}-\d+\b")
+_RE_ENV = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
+_RE_FILE = re.compile(
+    r"\b[\w./\\-]+/[\w./\\-]+"                       # contains a slash
+    r"|\b[\w-]+\.(?:" + "|".join(_CODE_EXTS) + r")\b"  # or code ext
+)
+# fqname: A::b  or  pkg.func / Class.method (alnum dotted, 2+ parts).
+_RE_SYMBOL = re.compile(
+    r"\b[A-Za-z_][\w]*(?:::[A-Za-z_][\w]*)+\b"       # foo::bar
+    r"|\b[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+\b"      # foo.bar.baz
+)
+
+
+def extract_entities(text: str) -> list[dict]:
+    """Pull structured entities out of free text with cheap regexes.
+
+    Returns a deduped list of ``{"type": ..., "value": ...}`` where type
+    is one of ``url``, ``file``, ``ticket``, ``env``, ``symbol``. KISS:
+    no NLP, no model — just patterns. Order is stable (URLs first, then
+    files, tickets, env vars, symbols) and exact-(type,value) duplicates
+    are collapsed. Matched URLs/files are masked before symbol detection
+    so ``example.com`` inside a URL isn't double-counted as a symbol."""
+    text = text or ""
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(kind: str, value: str) -> None:
+        value = value.strip()
+        if not value:
+            return
+        key = (kind, value)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({"type": kind, "value": value})
+
+    masked = text
+    for m in _RE_URL.finditer(text):
+        _add("url", m.group(0))
+    masked = _RE_URL.sub(" ", masked)
+    for m in _RE_FILE.finditer(masked):
+        _add("file", m.group(0))
+    file_masked = _RE_FILE.sub(" ", masked)
+    for m in _RE_TICKET.finditer(text):
+        _add("ticket", m.group(0))
+    for m in _RE_ENV.finditer(text):
+        _add("env", m.group(0))
+    # symbols last, over text with URLs + files stripped so we don't
+    # re-flag dotted file/host tokens as symbols.
+    for m in _RE_SYMBOL.finditer(file_masked):
+        _add("symbol", m.group(0))
+    return out
+
+
 # ─── helpers ──────────────────────────────────────────────────────────
+
+def _clamp01(x: float) -> float:
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return 1.0
+    return 0.0 if x < 0.0 else 1.0 if x > 1.0 else x
+
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
