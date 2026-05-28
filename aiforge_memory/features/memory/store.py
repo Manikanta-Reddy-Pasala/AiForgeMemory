@@ -171,6 +171,7 @@ def upsert_observation(
     event_time: float | None = None,
     id: str | None = None,
     dedupe: bool = True,
+    supersedes: list[str] | None = None,
 ) -> dict:
     """Record an agent / human observation.
 
@@ -193,6 +194,12 @@ def upsert_observation(
     real-world time the fact refers to, distinct from ``created_at``
     (the ingest timestamp). Defaults to the ingest moment when not
     supplied so old callers stay correct.
+
+    ``supersedes`` (gap #2, contradiction resolution): ids of older
+    Observation_v2 nodes this fact replaces. Each is marked
+    ``status='superseded'`` with a ``SUPERSEDES`` edge from the new
+    node, so the stale fact drops out of vector recall + the PPR
+    reranker instead of co-existing with its correction.
     """
     tags = list(tags or [])
     text = (text or "").strip()
@@ -238,7 +245,14 @@ def upsert_observation(
         s.run(_UPSERT_OBSERVATION, **params).consume()
         _link_refs(s, repo=repo, src_label="Observation_v2", src_id=nid,
                    refs=refs or [])
-    return {"id": nid, "label": "Observation_v2", "deduped": False}
+        for old_id in supersedes or []:
+            old_id = (old_id or "").strip()
+            if not old_id or old_id == nid:
+                continue
+            s.run(_SUPERSEDE_OBSERVATION,
+                  a=nid, b=old_id, repo=repo, now=time.time()).consume()
+    return {"id": nid, "label": "Observation_v2", "deduped": False,
+            "superseded": [s for s in (supersedes or []) if s]}
 
 
 # ─── Note ─────────────────────────────────────────────────────────────
@@ -379,9 +393,23 @@ _RECALL_OBSERVATION = """
 CALL db.index.vector.queryNodes('codemem_observation_embed', $k, $vec)
 YIELD node AS o, score
 WHERE o.repo = $repo
+  AND (o.status IS NULL OR o.status = 'active')
 RETURN o.id AS id, o.text AS text, o.kind AS kind,
        coalesce(o.tags,[]) AS tags, score
 ORDER BY score DESC LIMIT $k
+"""
+
+
+# Gap #2: mark an older Observation superseded by a newer one and draw
+# a SUPERSEDES edge (mirrors the Decision_v2 path). Superseded nodes are
+# excluded from both vanilla recall (above) and the PPR reranker, so a
+# corrected fact stops resurfacing alongside the stale one it replaced.
+_SUPERSEDE_OBSERVATION = """
+MATCH (a:Observation_v2 {id:$a}), (b:Observation_v2 {id:$b, repo:$repo})
+MERGE (a)-[:SUPERSEDES]->(b)
+SET b.status = 'superseded',
+    b.superseded_by = $a,
+    b.updated_at = datetime({epochSeconds: toInteger($now)})
 """
 
 
