@@ -29,7 +29,10 @@ aiforge-memory ingest <repo>                              # full ingest (tree-si
 aiforge-memory ingest-external <src> --repo <r>           # gap-9: file/http/raw → Doc + chunks
 aiforge-memory schedule run                               # periodic ingest daemon
 aiforge-memory remember <text>                            # write a memory fact
-aiforge-memory recall <query>                             # vector recall (PPR-lite reranked)
+aiforge-memory recall <query>                             # vector recall (PPR-lite reranked, excludes superseded)
+aiforge-memory recap <repo>                               # gap #5: human-readable digest of recent memory
+aiforge-memory handoff <repo>                             # gap #5: portable JSON memory snapshot for a fresh session
+aiforge-memory forget <repo> --id <id> --type <label>    # hard-delete one memory node
 aiforge-memory ui --host 0.0.0.0 --port 8767
 aiforge-memory health                                     # probe Neo4j + LM + sidecars
 ```
@@ -59,9 +62,10 @@ Full list: `aiforge-memory --help`.
 
 ### Observation_v2 / Decision_v2 writes — `features/memory/store.py`
 
-`upsert_observation(driver, *, repo, text, kind, tags, refs, embed_vec, media_refs, event_time, dedupe)`
+`upsert_observation(driver, *, repo, text, kind, tags, refs, embed_vec, media_refs, event_time, dedupe, supersedes)`
 
 - **Exact-text dedupe (gap-3, PR #4)** — when `dedupe=True` (default) a `(repo, text)` match returns the existing node id with `seen_count` bumped and `last_seen_at` stamped. Tags are unioned (APOC), with a counter-only fallback for plain Neo4j Community. Return adds `deduped: bool`.
+- **`supersedes` (gap #2, contradiction resolution)** — list of older Observation ids this fact replaces. Each is set `status='superseded'` with a `SUPERSEDES` edge from the new node; superseded nodes drop out of both vanilla `recall_observations` (now status-filtered) and the PPR reranker, so a corrected fact stops co-surfacing with the stale one. The AIForgeCrew learner wires this on semantic-near-dup (`SOFT ≤ sim < HARD`) — last-write-wins.
 - **`media_refs` (gap-10)** — list of image / video / file paths or URLs round-tripped as a string array so a future vision-embed pipeline can fold image features into recall.
 - **`event_time` (gap-7, bi-temporal)** — epoch seconds for the real-world time the fact refers to. Distinct from `created_at` (ingest moment). Defaults to ingest so old callers stay correct without a migration. Query layers can now hop by `event_time`.
 
