@@ -256,8 +256,13 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
                 )
             out.extend([[float(x) for x in v] for v in vecs])
         except Exception:
-            # batch endpoint missing or failed — per-item fallback
-            out.extend(_embed(t) for t in batch)
+            # batch endpoint missing or failed — per-item fallback.
+            # /embed 400s on whitespace-only text (batch mode accepts
+            # it) — substitute a placeholder so one blank chunk can't
+            # fail the whole file only in fallback mode.
+            out.extend(
+                _embed(t if t.strip() else "(empty chunk)") for t in batch
+            )
     return out
 
 
