@@ -118,6 +118,10 @@ _INDEX_STATEMENTS: list[str] = [
     "FOR (o:Observation_v2) ON (o.repo, o.created_at)",
     "CREATE INDEX codemem_observation_kind IF NOT EXISTS "
     "FOR (o:Observation_v2) ON (o.repo, o.kind)",
+    # Dedupe lookup key — short sha256 of text (see memory/store.py);
+    # avoids the O(n) {repo, text} scan on every upsert.
+    "CREATE INDEX codemem_observation_text_hash IF NOT EXISTS "
+    "FOR (o:Observation_v2) ON (o.repo, o.text_hash)",
     "CREATE FULLTEXT INDEX codemem_observation_ft IF NOT EXISTS "
     "FOR (o:Observation_v2) ON EACH [o.text, o.tags_text]",
     # Vector recall over observations (1024d bge-m3)
