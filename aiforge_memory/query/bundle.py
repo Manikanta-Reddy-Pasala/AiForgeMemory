@@ -330,50 +330,53 @@ def query(
     if bundle.cross_repo:
         bundle.sources_used.append("cross_repo")
 
-    # Token budget — drop low-priority sections if over using exact token counts
-    def _trim_to_budget():
-        if _count_tokens(bundle.render()) <= token_budget:
-            return
-        # Priority 1: drop callers/callees
-        bundle.callers = []
-        bundle.callees = []
-        if _count_tokens(bundle.render()) <= token_budget:
-            return
-
-        # Priority 2: drop cross-repo and decisions/observations
-        bundle.cross_repo = []
-        bundle.decisions = []
-        bundle.observations = []
-        bundle.notes = []
-        bundle.docs = []
-        if _count_tokens(bundle.render()) <= token_budget:
-            return
-
-        # Priority 3: trim chunks
-        bundle.chunks = bundle.chunks[:2]
-        if _count_tokens(bundle.render()) <= token_budget:
-            return
-
-        bundle.chunks = []
-        if _count_tokens(bundle.render()) <= token_budget:
-            return
-
-        # Priority 4: trim symbols and files
-        bundle.symbols = bundle.symbols[:6]
-        bundle.files = bundle.files[:4]
-        if _count_tokens(bundle.render()) <= token_budget:
-            return
-
-        # Priority 5: hard trim
-        bundle.symbols = []
-        bundle.files = []
-        bundle.services = []
-        bundle.runbook_md = bundle.runbook_md[:500]
-        bundle.conventions_md = bundle.conventions_md[:500]
-
-    _trim_to_budget()
+    _trim_to_budget(bundle, token_budget)
 
     return bundle
+
+
+def _trim_to_budget(bundle: ContextBundle, token_budget: int) -> None:
+    """Drop low-priority sections until the rendered bundle fits the
+    token budget (exact token counts)."""
+    if _count_tokens(bundle.render()) <= token_budget:
+        return
+    # Priority 1: drop callers/callees
+    bundle.callers = []
+    bundle.callees = []
+    if _count_tokens(bundle.render()) <= token_budget:
+        return
+
+    # Priority 2: trim chunks — raw code is re-readable from disk,
+    # memory facts (decisions/observations/notes) are not.
+    bundle.chunks = bundle.chunks[:2]
+    if _count_tokens(bundle.render()) <= token_budget:
+        return
+
+    bundle.chunks = []
+    if _count_tokens(bundle.render()) <= token_budget:
+        return
+
+    # Priority 3: drop cross-repo and decisions/observations
+    bundle.cross_repo = []
+    bundle.decisions = []
+    bundle.observations = []
+    bundle.notes = []
+    bundle.docs = []
+    if _count_tokens(bundle.render()) <= token_budget:
+        return
+
+    # Priority 4: trim symbols and files
+    bundle.symbols = bundle.symbols[:6]
+    bundle.files = bundle.files[:4]
+    if _count_tokens(bundle.render()) <= token_budget:
+        return
+
+    # Priority 5: hard trim
+    bundle.symbols = []
+    bundle.files = []
+    bundle.services = []
+    bundle.runbook_md = bundle.runbook_md[:500]
+    bundle.conventions_md = bundle.conventions_md[:500]
 
 
 def _services_rows(driver, *, repo: str, names: list[str]) -> list[dict]:
