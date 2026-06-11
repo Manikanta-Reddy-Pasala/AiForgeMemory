@@ -94,11 +94,6 @@ _INDEX_STATEMENTS: list[str] = [
     # Chunk_v2 — keyed on globally unique id (file_path + offset)
     "CREATE CONSTRAINT codemem_chunk_unique IF NOT EXISTS "
     "FOR (c:Chunk_v2) REQUIRE c.id IS UNIQUE",
-    # Vector index for top-K retrieval (bge-m3 1024d cosine)
-    "CREATE VECTOR INDEX codemem_chunk_embed IF NOT EXISTS "
-    "FOR (c:Chunk_v2) ON c.embed_vec "
-    "OPTIONS {indexConfig: {`vector.dimensions`: 1024, "
-    "                        `vector.similarity_function`: 'cosine'}}",
 
     # ── Memory layer (Decision_v2 / Observation_v2 / Note_v2) ─────────
     # Decisions: durable architectural / process choices ("we picked X over Y")
@@ -124,11 +119,6 @@ _INDEX_STATEMENTS: list[str] = [
     "FOR (o:Observation_v2) ON (o.repo, o.text_hash)",
     "CREATE FULLTEXT INDEX codemem_observation_ft IF NOT EXISTS "
     "FOR (o:Observation_v2) ON EACH [o.text, o.tags_text]",
-    # Vector recall over observations (1024d bge-m3)
-    "CREATE VECTOR INDEX codemem_observation_embed IF NOT EXISTS "
-    "FOR (o:Observation_v2) ON o.embed_vec "
-    "OPTIONS {indexConfig: {`vector.dimensions`: 1024, "
-    "                        `vector.similarity_function`: 'cosine'}}",
 
     # Notes: free-form memos, README-like; lightweight (no embed required)
     "CREATE CONSTRAINT codemem_note_unique IF NOT EXISTS "
@@ -162,6 +152,37 @@ _INDEX_STATEMENTS: list[str] = [
 ]
 
 
+def _vector_index_statements(dim: int) -> list[str]:
+    """Vector indexes for chunk + observation recall. The dimension
+    follows the embed sidecar config (AIFORGE_EMBED_DIM, default 1024
+    for bge-m3) instead of being hardcoded — see ``embed_config()`` in
+    features/chunk/embed.py."""
+    return [
+        # Vector index for top-K retrieval (cosine)
+        "CREATE VECTOR INDEX codemem_chunk_embed IF NOT EXISTS "
+        "FOR (c:Chunk_v2) ON c.embed_vec "
+        f"OPTIONS {{indexConfig: {{`vector.dimensions`: {dim}, "
+        "                        `vector.similarity_function`: 'cosine'}}",
+        # Vector recall over observations
+        "CREATE VECTOR INDEX codemem_observation_embed IF NOT EXISTS "
+        "FOR (o:Observation_v2) ON o.embed_vec "
+        f"OPTIONS {{indexConfig: {{`vector.dimensions`: {dim}, "
+        "                        `vector.similarity_function`: 'cosine'}}",
+    ]
+
+
+def _embed_dim() -> int:
+    """Resolve the embedding dimension from the same config the chunk
+    embedder uses. Falls back to the env var directly (then 1024) if
+    the feature module can't load — schema apply must never fail on a
+    missing optional dependency."""
+    try:
+        from aiforge_memory.features.chunk.embed import embed_config
+        return int(embed_config()["dim"])
+    except Exception:  # noqa: BLE001
+        return int(os.environ.get("AIFORGE_EMBED_DIM", "1024"))
+
+
 def _repo_name_constraint_exists(session) -> str | None:
     """Return the name of any uniqueness constraint on (:Repo {name}), or None."""
     rows = list(session.run(
@@ -186,6 +207,6 @@ def apply(driver) -> None:
                 "FOR (r:Repo) REQUIRE r.name IS UNIQUE"
             ).consume()
 
-    for stmt in _INDEX_STATEMENTS:
+    for stmt in _INDEX_STATEMENTS + _vector_index_statements(_embed_dim()):
         with driver.session() as session:
             session.run(stmt).consume()
