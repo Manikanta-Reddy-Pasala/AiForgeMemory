@@ -109,7 +109,9 @@ def chunk_and_embed(
             # retries the whole file next delta
             failed_paths.append(wf.path)
             continue
-        for (idx, ch_text, line_start, line_end), vec in zip(chunks, vecs):
+        for (idx, ch_text, line_start, line_end), vec in zip(
+            chunks, vecs, strict=True,
+        ):
             out.append(WalkedChunk(
                 id=_chunk_id(repo, wf.path, idx),
                 repo=repo, file_path=wf.path,

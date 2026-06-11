@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import mimetypes
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 
