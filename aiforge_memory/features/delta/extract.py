@@ -233,6 +233,7 @@ def ingest_delta(
 
     files_count = symbols_count = imports_count = calls_count = 0
     summaries_updated = chunks_count = 0
+    embed_failed: list[str] = []
 
     if walked:
         scounts = symbol_writer.upsert_files_and_symbols(
@@ -271,7 +272,7 @@ def ingest_delta(
             summaries_updated = sumcounts["updated"]
 
         if not skip_chunks:
-            chunks = embed.chunk_and_embed(
+            chunks, embed_failed = embed.chunk_and_embed(
                 walked, repo=repo_name, repo_root=repo_path,
             )
             if chunks:
@@ -280,11 +281,15 @@ def ingest_delta(
                 )
                 chunks_count = ccounts["chunks"]
 
-    # Update merkle + git head so next delta is fresh.
+    # Update merkle + git head so next delta is fresh. Files whose
+    # embed failed keep their stale hash so the next delta (merkle
+    # fallback once head_sha matches) re-indexes them.
     if walked:
+        failed = set(embed_failed)
         sdb.upsert_file_hashes(
             state_conn, repo=repo_name,
-            hashes={wf.path: wf.hash for wf in walked},
+            hashes={wf.path: wf.hash for wf in walked
+                    if wf.path not in failed},
         )
     if cs.head_sha:
         sdb.set_repo_git_head(

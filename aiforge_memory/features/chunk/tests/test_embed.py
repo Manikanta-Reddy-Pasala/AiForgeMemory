@@ -50,7 +50,8 @@ def test_chunk_and_embed_calls_sidecar(tmp_path) -> None:
     walked = [_walked("x.py")]
     fake_vec = [0.1] * 1024
     with patch.object(em, "_embed", return_value=fake_vec) as mock_embed:
-        chunks = em.chunk_and_embed(walked, repo="t", repo_root=tmp_path)
+        chunks, failed = em.chunk_and_embed(walked, repo="t", repo_root=tmp_path)
+    assert failed == []
     assert len(chunks) >= 1
     assert chunks[0].embed_vec == fake_vec
     assert chunks[0].repo == "t"
@@ -62,8 +63,9 @@ def test_chunk_and_embed_skips_too_large(tmp_path) -> None:
     p = tmp_path / "big.py"
     p.write_text("x = 0\n" * 100_000)
     walked = [_walked("big.py")]
-    chunks = em.chunk_and_embed(walked, repo="t", repo_root=tmp_path)
+    chunks, failed = em.chunk_and_embed(walked, repo="t", repo_root=tmp_path)
     assert chunks == []
+    assert failed == []
 
 
 def test_chunk_and_embed_skips_parse_error(tmp_path) -> None:
@@ -73,8 +75,9 @@ def test_chunk_and_embed_skips_parse_error(tmp_path) -> None:
         repo="t", path="x.py", hash="h", lang="python",
         lines=1, parse_error=True,
     )]
-    chunks = em.chunk_and_embed(walked, repo="t", repo_root=tmp_path)
+    chunks, failed = em.chunk_and_embed(walked, repo="t", repo_root=tmp_path)
     assert chunks == []
+    assert failed == []
 
 
 def test_sidecar_failure_skips_remaining_chunks(tmp_path) -> None:
@@ -82,5 +85,6 @@ def test_sidecar_failure_skips_remaining_chunks(tmp_path) -> None:
     p.write_text("\n".join(f"l{i}" for i in range(150)))
     walked = [_walked("x.py")]
     with patch.object(em, "_embed", side_effect=RuntimeError("sidecar down")):
-        chunks = em.chunk_and_embed(walked, repo="t", repo_root=tmp_path)
+        chunks, failed = em.chunk_and_embed(walked, repo="t", repo_root=tmp_path)
     assert chunks == []
+    assert failed == ["x.py"]

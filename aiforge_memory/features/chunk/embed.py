@@ -70,9 +70,17 @@ def chunk_and_embed(
     *,
     repo: str,
     repo_root: str | Path,
-) -> list[WalkedChunk]:
+) -> tuple[list[WalkedChunk], list[str]]:
+    """Chunk + embed every eligible file.
+
+    Returns ``(chunks, failed_paths)``. A file lands in ``failed_paths``
+    when any of its chunks failed to embed (sidecar down / 5xx); none of
+    its chunks are returned so callers neither upsert a partial set nor
+    prune the file's existing chunks, and they must skip the merkle-hash
+    update for it so the next delta retries the whole file."""
     repo_root = Path(repo_root)
     out: list[WalkedChunk] = []
+    failed_paths: list[str] = []
 
     for wf in walked:
         if wf.parse_error or wf.lang == "other":
@@ -92,22 +100,29 @@ def chunk_and_embed(
             else _split(text, file_path=wf.path)
         )
 
+        file_chunks: list[WalkedChunk] = []
+        failed = False
         for idx, ch_text, line_start, line_end in chunks:
             chunk_id = _chunk_id(repo, wf.path, idx)
             try:
                 vec = _embed(ch_text)
             except Exception:
-                vec = []
-                # if even one chunk fails, skip the file's remaining chunks
-                # (sidecar is probably down)
+                # one chunk failed → the file failed; drop its partial
+                # chunks so the existing graph copy survives, caller
+                # retries the whole file next delta
+                failed = True
                 break
-            out.append(WalkedChunk(
+            file_chunks.append(WalkedChunk(
                 id=chunk_id, repo=repo, file_path=wf.path,
                 text=ch_text, embed_vec=vec,
                 token_count=len(ch_text) // 4,
                 line_start=line_start, line_end=line_end,
             ))
-    return out
+        if failed:
+            failed_paths.append(wf.path)
+        else:
+            out.extend(file_chunks)
+    return out, failed_paths
 
 
 def _split(text: str, *, file_path: str) -> list[tuple[int, str, int, int]]:

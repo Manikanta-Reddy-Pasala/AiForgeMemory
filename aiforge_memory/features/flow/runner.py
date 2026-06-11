@@ -142,8 +142,9 @@ def ingest_repo(
 
     # Stage 7 — chunk embeddings
     chunks_count = 0
+    embed_failed: list[str] = []
     if not skip_chunks and walked:
-        chunks = embed.chunk_and_embed(
+        chunks, embed_failed = embed.chunk_and_embed(
             walked, repo=repo_name, repo_root=repo_path,
         )
         if chunks:
@@ -155,10 +156,14 @@ def ingest_repo(
     sdb.set_repo_pack_sha(state_conn, repo=repo_name, pack_sha=sha)
     # Persist per-file hashes + git head so subsequent --delta runs have
     # state to diff against. Without this, delta hits cold_start every time.
+    # Files whose embed failed keep no/stale hash so the next delta
+    # retries them.
     if walked:
+        failed = set(embed_failed)
         sdb.upsert_file_hashes(
             state_conn, repo=repo_name,
-            hashes={wf.path: wf.hash for wf in walked},
+            hashes={wf.path: wf.hash for wf in walked
+                    if wf.path not in failed},
         )
     try:
         gmeta = git_meta.read(repo_path)
