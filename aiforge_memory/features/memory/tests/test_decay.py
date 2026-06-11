@@ -43,7 +43,10 @@ class _FakeDriver:
 
 def test_decay_cypher_archives_only_cold_active_old_facts():
     cy = decay._DECAY_CY
-    assert "o:Observation_v2 OR o:Decision_v2" in cy
+    # Observations only — Decision_v2 has no touch path, so age-based
+    # decay would archive every decision older than the threshold.
+    assert "MATCH (o:Observation_v2)" in cy
+    assert "Decision_v2" not in cy
     assert "o.status IS NULL OR o.status = 'active'" in cy
     assert "coalesce(o.seen_count, 1) <= 1" in cy
     assert "duration({days: $days})" in cy

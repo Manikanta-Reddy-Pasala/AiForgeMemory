@@ -17,6 +17,7 @@ everything (used by `aiforge codemem reset`).
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +35,8 @@ from aiforge_memory.features.service import store as service_writer
 from aiforge_memory.features.symbol import extract as treesitter_walk
 from aiforge_memory.features.symbol import extract_calls as edges
 from aiforge_memory.features.symbol import store as symbol_writer
+
+log = logging.getLogger("aiforge_memory.flow")
 
 
 @dataclass
@@ -160,18 +163,32 @@ def ingest_repo(
             )
             chunks_count = ccounts["chunks"]
 
-    sdb.set_repo_pack_sha(state_conn, repo=repo_name, pack_sha=sha)
     # Persist per-file hashes + git head so subsequent --delta runs have
     # state to diff against. Without this, delta hits cold_start every time.
     # Files whose embed failed keep no/stale hash so the next delta
     # retries them.
+    surviving_hashes: dict = {}
     if walked:
         failed = set(embed_failed)
+        surviving_hashes = {wf.path: wf.hash for wf in walked
+                            if wf.path not in failed}
         sdb.upsert_file_hashes(
-            state_conn, repo=repo_name,
-            hashes={wf.path: wf.hash for wf in walked
-                    if wf.path not in failed},
+            state_conn, repo=repo_name, hashes=surviving_hashes,
         )
+    # Cold-loop guard: on a FIRST ingest with the embed sidecar fully
+    # down, every walked file fails → zero hashes written. Recording
+    # pack_sha then traps the repo: next delta sees no hashes → cold
+    # start → full ingest sees pack unchanged → skipped_unchanged,
+    # forever (until repo content changes). Skip the pack_sha write in
+    # that state so the next sweep retries the full ingest.
+    if walked and not surviving_hashes and embed_failed:
+        log.warning(
+            "ingest %s: ALL %d files failed embedding — not recording "
+            "pack_sha so the next run retries", repo_name,
+            len(embed_failed),
+        )
+    else:
+        sdb.set_repo_pack_sha(state_conn, repo=repo_name, pack_sha=sha)
     try:
         gmeta = git_meta.read(repo_path)
         if gmeta.head_sha:
