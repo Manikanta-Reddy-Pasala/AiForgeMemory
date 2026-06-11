@@ -215,10 +215,17 @@ def query(
     else:
         bundle.sources_used.append("translator")
 
-    # Hydrate Service rows
+    # Hydrate Service rows. Each hydration step below is individually
+    # guarded — a Neo4j hiccup in one source degrades that source to
+    # empty (recorded in bundle.errors) instead of failing the whole
+    # bundle query.
     if g.services:
-        bundle.services = _services_rows(driver, repo=repo, names=g.services)
-        bundle.sources_used.append("services")
+        try:
+            bundle.services = _services_rows(
+                driver, repo=repo, names=g.services)
+            bundle.sources_used.append("services")
+        except Exception as exc:  # noqa: BLE001
+            bundle.errors.append(f"services: {exc}")
 
     # Hydrate File rows (with summary). Decorate each row with the
     # retrieval score the translator computed so the UI can show
@@ -227,24 +234,30 @@ def query(
     if hit and hit.kind == "file":
         file_paths = [hit.value] + file_paths
     if file_paths:
-        bundle.files = _files_rows(driver, repo=repo, paths=file_paths)
-        for row in bundle.files:
-            row["score"] = float(
-                getattr(g, "file_scores", {}).get(row.get("path"), 0.0)
-            )
-        bundle.sources_used.append("files")
+        try:
+            bundle.files = _files_rows(driver, repo=repo, paths=file_paths)
+            for row in bundle.files:
+                row["score"] = float(
+                    getattr(g, "file_scores", {}).get(row.get("path"), 0.0)
+                )
+            bundle.sources_used.append("files")
+        except Exception as exc:  # noqa: BLE001
+            bundle.errors.append(f"files: {exc}")
 
     # Hydrate Symbol rows
     sym_fqnames = list(g.symbols)
-    if hit and hit.kind == "symbol":
-        # fastpath symbol guess — search by terminal name
-        bundle.symbols = _symbols_by_terminal_name(
-            driver, repo=repo, name=hit.value.rsplit(".", 1)[-1],
-        )
-    if sym_fqnames:
-        bundle.symbols = _symbols_rows(driver, repo=repo, fqnames=sym_fqnames) \
-            + bundle.symbols
-        bundle.sources_used.append("symbols")
+    try:
+        if hit and hit.kind == "symbol":
+            # fastpath symbol guess — search by terminal name
+            bundle.symbols = _symbols_by_terminal_name(
+                driver, repo=repo, name=hit.value.rsplit(".", 1)[-1],
+            )
+        if sym_fqnames:
+            bundle.symbols = _symbols_rows(
+                driver, repo=repo, fqnames=sym_fqnames) + bundle.symbols
+            bundle.sources_used.append("symbols")
+    except Exception as exc:  # noqa: BLE001
+        bundle.errors.append(f"symbols: {exc}")
     # Decorate symbol rows with retrieval score (0.0 when unranked).
     for row in bundle.symbols:
         row["score"] = float(
@@ -253,14 +266,21 @@ def query(
 
     # Call neighbours (1 hop) for top symbol
     if bundle.symbols:
-        primary = bundle.symbols[0]["fqname"]
-        bundle.callers, bundle.callees = _call_neighbours(
-            driver, repo=repo, fqname=primary, hops=g.hops,
-        )
-        bundle.sources_used.append("calls")
+        try:
+            primary = bundle.symbols[0]["fqname"]
+            bundle.callers, bundle.callees = _call_neighbours(
+                driver, repo=repo, fqname=primary, hops=g.hops,
+            )
+            bundle.sources_used.append("calls")
+        except Exception as exc:  # noqa: BLE001
+            bundle.errors.append(f"calls: {exc}")
 
     # Repo runbook (always cheap to fetch)
-    bundle.runbook_md, bundle.conventions_md = _repo_docs_for(driver, repo=repo)
+    try:
+        bundle.runbook_md, bundle.conventions_md = _repo_docs_for(
+            driver, repo=repo)
+    except Exception as exc:  # noqa: BLE001
+        bundle.errors.append(f"repo_docs: {exc}")
     if bundle.runbook_md:
         bundle.sources_used.append("runbook")
     if bundle.conventions_md:
