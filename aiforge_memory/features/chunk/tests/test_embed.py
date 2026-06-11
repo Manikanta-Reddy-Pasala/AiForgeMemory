@@ -4,8 +4,12 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from aiforge_memory.features.chunk import embed as em
 from aiforge_memory.features.symbol.extract import WalkedFile, WalkedSymbol
+
+pytestmark = pytest.mark.usefixtures("no_live_sidecar")
 
 FIX = (
     Path(__file__).parent.parent.parent / "symbol" / "tests" / "fixtures" / "poly_repo"

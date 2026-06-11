@@ -12,10 +12,14 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from aiforge_memory.core import state as sdb
 from aiforge_memory.features.chunk import embed as em
 from aiforge_memory.features.delta import extract as delta
 from aiforge_memory.features.symbol.extract import WalkedFile, WalkedSymbol
+
+pytestmark = pytest.mark.usefixtures("no_live_sidecar")
 
 
 def _walked(path: str, lang: str = "python") -> WalkedFile:
