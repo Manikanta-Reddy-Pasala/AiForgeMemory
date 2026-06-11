@@ -75,9 +75,11 @@ def _check_neo4j() -> CheckResult:
 
 
 def _check_lm() -> CheckResult:
+    # Same env chain + default as translator.py / file/extract.py —
+    # the probe must watch the endpoint ingest actually talks to.
     url = os.environ.get(
         "AIFORGE_CODEMEM_LM_URL",
-        os.environ.get("AIFORGE_INTENT_LM_URL", "http://127.0.0.1:1234/v1"),
+        os.environ.get("AIFORGE_INTENT_LM_URL", "http://127.0.0.1:1235/v1"),
     )
     probe = url.rstrip("/") + "/models"
     t0 = time.perf_counter()
