@@ -3,10 +3,17 @@ from __future__ import annotations
 
 from aiforge_memory.features.file.extract import FileSummary
 
+# Empty summary means the extract pass failed/skipped (llm_error,
+# too_large, …) — keep whatever good summary the graph already holds
+# instead of clobbering it. Same guard for purpose_tags.
 _UPDATE_FILE = """
 MATCH (f:File_v2 {repo: $repo, path: $path})
-SET f.summary       = $summary,
-    f.purpose_tags  = $purpose_tags,
+SET f.summary       = CASE WHEN $summary = ''
+                           THEN coalesce(f.summary, '')
+                           ELSE $summary END,
+    f.purpose_tags  = CASE WHEN size($purpose_tags) = 0
+                           THEN coalesce(f.purpose_tags, [])
+                           ELSE $purpose_tags END,
     f.skipped_reason = $skipped_reason
 """
 
