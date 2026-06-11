@@ -15,7 +15,6 @@ MERGE (c:Chunk_v2 {id: r.id})
 SET c.repo        = r.repo,
     c.file_path   = r.file_path,
     c.text        = r.text,
-    c.embed_vec   = r.embed_vec,
     c.token_count = r.token_count,
     c.line_start  = r.line_start,
     c.line_end    = r.line_end,
@@ -49,7 +48,7 @@ def upsert_chunks(driver, *, repo: str, chunks: list[WalkedChunk]) -> dict:
     ]
     chunk_rows = [
         {"id": c.id, "repo": c.repo, "file_path": c.file_path,
-         "text": c.text, "embed_vec": c.embed_vec,
+         "text": c.text,
          "token_count": c.token_count,
          "line_start": c.line_start, "line_end": c.line_end}
         for c in chunks

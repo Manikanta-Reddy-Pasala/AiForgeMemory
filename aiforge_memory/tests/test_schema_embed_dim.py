@@ -14,7 +14,7 @@ def test_dim_follows_embed_env(monkeypatch):
     monkeypatch.setenv("AIFORGE_EMBED_DIM", "768")
     assert schema._embed_dim() == 768
     stmts = schema._vector_index_statements(schema._embed_dim())
-    assert len(stmts) == 2
+    assert len(stmts) == 1  # observation index only — chunk vectors removed
     for stmt in stmts:
         assert "`vector.dimensions`: 768" in stmt
         assert "1024" not in stmt

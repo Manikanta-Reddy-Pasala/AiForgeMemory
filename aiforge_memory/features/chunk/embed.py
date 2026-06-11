@@ -3,7 +3,7 @@
 For each WalkedFile (lang != 'other', size <= MAX_FILE_BYTES, no parse error):
     - split text into ~50-line chunks with 10-line overlap
     - embed each chunk via the bge-m3 sidecar (POST /embed)
-    - emit Chunk_v2 rows: {id, repo, file_path, text, embed_vec, token_count}
+    - emit Chunk_v2 rows: {id, repo, file_path, text, token_count}
 
 Soft contract:
     - sidecar 5xx / unreachable → skip file silently, increment counter
@@ -19,10 +19,8 @@ from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-
-import httpx
 
 from aiforge_memory.features.symbol.extract import WalkedFile
 
@@ -38,7 +36,6 @@ DOC_MAX_FILE_BYTES = int(os.environ.get("AIFORGE_CODEMEM_DOC_MAX_BYTES", "262144
 CHUNK_LINES = int(os.environ.get("AIFORGE_CODEMEM_CHUNK_LINES", "50"))
 DOC_CHUNK_LINES = int(os.environ.get("AIFORGE_CODEMEM_DOC_CHUNK_LINES", "60"))
 CHUNK_OVERLAP = int(os.environ.get("AIFORGE_CODEMEM_CHUNK_OVERLAP", "10"))
-EMBED_BATCH_SIZE = int(os.environ.get("AIFORGE_EMBED_BATCH_SIZE", "32"))
 
 
 def embed_config() -> dict:
@@ -60,7 +57,6 @@ class WalkedChunk:
     repo: str
     file_path: str
     text: str
-    embed_vec: list[float] = field(default_factory=list)
     token_count: int = 0
     line_start: int = 0
     line_end: int = 0
@@ -72,13 +68,18 @@ def chunk_and_embed(
     repo: str,
     repo_root: str | Path,
 ) -> tuple[list[WalkedChunk], list[str]]:
-    """Chunk + embed every eligible file.
+    """Chunk every eligible file. NO embedding.
 
-    Returns ``(chunks, failed_paths)``. A file lands in ``failed_paths``
-    when any of its chunks failed to embed (sidecar down / 5xx); none of
-    its chunks are returned so callers neither upsert a partial set nor
-    prune the file's existing chunks, and they must skip the merkle-hash
-    update for it so the next delta retries the whole file."""
+    Code-chunk vectors were removed (2026-06-11): their only consumer
+    was the translator's NL→file anchoring, which a fulltext index over
+    chunk text covers at zero embed cost — while embedding was the
+    slowest ingest stage, went stale between ingests, and coupled
+    ingest to the embed sidecar. Observation_v2 vectors (NL memory)
+    are unaffected.
+
+    Returns ``(chunks, failed_paths)`` — the tuple shape is kept for
+    caller compatibility; with no embedding step ``failed_paths`` is
+    always empty."""
     repo_root = Path(repo_root)
     out: list[WalkedChunk] = []
     failed_paths: list[str] = []
@@ -101,21 +102,11 @@ def chunk_and_embed(
             else _split(text, file_path=wf.path)
         )
 
-        try:
-            vecs = _embed_batch([ch_text for _, ch_text, _, _ in chunks])
-        except Exception:
-            # any chunk failed → the file failed; drop its partial
-            # chunks so the existing graph copy survives, caller
-            # retries the whole file next delta
-            failed_paths.append(wf.path)
-            continue
-        for (idx, ch_text, line_start, line_end), vec in zip(
-            chunks, vecs, strict=True,
-        ):
+        for idx, ch_text, line_start, line_end in chunks:
             out.append(WalkedChunk(
                 id=_chunk_id(repo, wf.path, idx),
                 repo=repo, file_path=wf.path,
-                text=ch_text, embed_vec=vec,
+                text=ch_text,
                 token_count=len(ch_text) // 4,
                 line_start=line_start, line_end=line_end,
             ))
@@ -224,63 +215,3 @@ def _split_doc(text: str, *, file_path: str) -> list[tuple[int, str, int, int]]:
 def _chunk_id(repo: str, file_path: str, idx: int) -> str:
     raw = f"{repo}::{file_path}::{idx}".encode()
     return hashlib.sha256(raw).hexdigest()[:32]
-
-
-def _embed_batch(texts: list[str]) -> list[list[float]]:
-    """Embed many texts via POST /embed_batch, EMBED_BATCH_SIZE at a
-    time. One HTTP round trip per batch instead of one per chunk.
-
-    Wire protocol (see embed_sidecar): POST {"texts": [...]} →
-    {"embeddings": [[...], ...]}. When a batch call fails (older
-    sidecar without /embed_batch, transient 5xx) we fall back to
-    per-item ``_embed`` for that batch; per-item errors propagate so
-    the caller can mark the file failed."""
-    if not texts:
-        return []
-    cfg = embed_config()
-    url = cfg["url"].rstrip("/") + "/embed_batch"
-    out: list[list[float]] = []
-    for i in range(0, len(texts), EMBED_BATCH_SIZE):
-        batch = texts[i:i + EMBED_BATCH_SIZE]
-        try:
-            payload: dict = {"texts": batch}
-            if cfg["model"] != DEFAULT_EMBED_MODEL:
-                payload["model"] = cfg["model"]
-            r = httpx.post(url, json=payload, timeout=60.0)
-            r.raise_for_status()
-            vecs = r.json().get("embeddings") or []
-            if len(vecs) != len(batch):
-                raise ValueError(
-                    f"embed_batch returned {len(vecs)} vectors "
-                    f"for {len(batch)} texts"
-                )
-            out.extend([[float(x) for x in v] for v in vecs])
-        except Exception:
-            # batch endpoint missing or failed — per-item fallback.
-            # /embed 400s on whitespace-only text (batch mode accepts
-            # it) — substitute a placeholder so one blank chunk can't
-            # fail the whole file only in fallback mode.
-            out.extend(
-                _embed(t if t.strip() else "(empty chunk)") for t in batch
-            )
-    return out
-
-
-def _embed(text: str) -> list[float]:
-    """Call /embed on the configured sidecar.
-
-    Model/URL/dim resolved via ``embed_config()`` (env-pluggable).
-    Wire protocol is unchanged for the bge-m3 default: POST {"text": ...} →
-    {"embedding"|"vector": [...]}. When a non-default model is configured,
-    the model name is forwarded so a multi-model sidecar can route on it.
-    """
-    cfg = embed_config()
-    url = cfg["url"].rstrip("/") + "/embed"
-    payload: dict = {"text": text}
-    if cfg["model"] != DEFAULT_EMBED_MODEL:
-        payload["model"] = cfg["model"]
-    r = httpx.post(url, json=payload, timeout=15.0)
-    r.raise_for_status()
-    data = r.json()
-    vec = data.get("embedding") or data.get("vector") or []
-    return [float(x) for x in vec]
