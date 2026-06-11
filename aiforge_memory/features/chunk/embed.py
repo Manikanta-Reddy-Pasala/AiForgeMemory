@@ -38,6 +38,7 @@ DOC_MAX_FILE_BYTES = int(os.environ.get("AIFORGE_CODEMEM_DOC_MAX_BYTES", "262144
 CHUNK_LINES = int(os.environ.get("AIFORGE_CODEMEM_CHUNK_LINES", "50"))
 DOC_CHUNK_LINES = int(os.environ.get("AIFORGE_CODEMEM_DOC_CHUNK_LINES", "60"))
 CHUNK_OVERLAP = int(os.environ.get("AIFORGE_CODEMEM_CHUNK_OVERLAP", "10"))
+EMBED_BATCH_SIZE = int(os.environ.get("AIFORGE_EMBED_BATCH_SIZE", "32"))
 
 
 def embed_config() -> dict:
@@ -70,9 +71,17 @@ def chunk_and_embed(
     *,
     repo: str,
     repo_root: str | Path,
-) -> list[WalkedChunk]:
+) -> tuple[list[WalkedChunk], list[str]]:
+    """Chunk + embed every eligible file.
+
+    Returns ``(chunks, failed_paths)``. A file lands in ``failed_paths``
+    when any of its chunks failed to embed (sidecar down / 5xx); none of
+    its chunks are returned so callers neither upsert a partial set nor
+    prune the file's existing chunks, and they must skip the merkle-hash
+    update for it so the next delta retries the whole file."""
     repo_root = Path(repo_root)
     out: list[WalkedChunk] = []
+    failed_paths: list[str] = []
 
     for wf in walked:
         if wf.parse_error or wf.lang == "other":
@@ -92,22 +101,25 @@ def chunk_and_embed(
             else _split(text, file_path=wf.path)
         )
 
-        for idx, ch_text, line_start, line_end in chunks:
-            chunk_id = _chunk_id(repo, wf.path, idx)
-            try:
-                vec = _embed(ch_text)
-            except Exception:
-                vec = []
-                # if even one chunk fails, skip the file's remaining chunks
-                # (sidecar is probably down)
-                break
+        try:
+            vecs = _embed_batch([ch_text for _, ch_text, _, _ in chunks])
+        except Exception:
+            # any chunk failed → the file failed; drop its partial
+            # chunks so the existing graph copy survives, caller
+            # retries the whole file next delta
+            failed_paths.append(wf.path)
+            continue
+        for (idx, ch_text, line_start, line_end), vec in zip(
+            chunks, vecs, strict=True,
+        ):
             out.append(WalkedChunk(
-                id=chunk_id, repo=repo, file_path=wf.path,
+                id=_chunk_id(repo, wf.path, idx),
+                repo=repo, file_path=wf.path,
                 text=ch_text, embed_vec=vec,
                 token_count=len(ch_text) // 4,
                 line_start=line_start, line_end=line_end,
             ))
-    return out
+    return out, failed_paths
 
 
 def _split(text: str, *, file_path: str) -> list[tuple[int, str, int, int]]:
@@ -212,6 +224,41 @@ def _split_doc(text: str, *, file_path: str) -> list[tuple[int, str, int, int]]:
 def _chunk_id(repo: str, file_path: str, idx: int) -> str:
     raw = f"{repo}::{file_path}::{idx}".encode()
     return hashlib.sha256(raw).hexdigest()[:32]
+
+
+def _embed_batch(texts: list[str]) -> list[list[float]]:
+    """Embed many texts via POST /embed_batch, EMBED_BATCH_SIZE at a
+    time. One HTTP round trip per batch instead of one per chunk.
+
+    Wire protocol (see embed_sidecar): POST {"texts": [...]} →
+    {"embeddings": [[...], ...]}. When a batch call fails (older
+    sidecar without /embed_batch, transient 5xx) we fall back to
+    per-item ``_embed`` for that batch; per-item errors propagate so
+    the caller can mark the file failed."""
+    if not texts:
+        return []
+    cfg = embed_config()
+    url = cfg["url"].rstrip("/") + "/embed_batch"
+    out: list[list[float]] = []
+    for i in range(0, len(texts), EMBED_BATCH_SIZE):
+        batch = texts[i:i + EMBED_BATCH_SIZE]
+        try:
+            payload: dict = {"texts": batch}
+            if cfg["model"] != DEFAULT_EMBED_MODEL:
+                payload["model"] = cfg["model"]
+            r = httpx.post(url, json=payload, timeout=60.0)
+            r.raise_for_status()
+            vecs = r.json().get("embeddings") or []
+            if len(vecs) != len(batch):
+                raise ValueError(
+                    f"embed_batch returned {len(vecs)} vectors "
+                    f"for {len(batch)} texts"
+                )
+            out.extend([[float(x) for x in v] for v in vecs])
+        except Exception:
+            # batch endpoint missing or failed — per-item fallback
+            out.extend(_embed(t) for t in batch)
+    return out
 
 
 def _embed(text: str) -> list[float]:

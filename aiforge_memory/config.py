@@ -114,6 +114,10 @@ class RepoConfig:
         embed = data.get("embed") or {}
         neo4j = data.get("neo4j") or {}
 
+        # Same env fallback chain as every other Neo4j entrypoint.
+        from aiforge_memory.core.neo4j import neo4j_settings
+        env_uri, env_user, env_pw = neo4j_settings()
+
         cfg = cls(
             name=name or str(repo.get("name") or repo_path.name),
             path=str(repo.get("path") or repo_path),
@@ -146,15 +150,9 @@ class RepoConfig:
             embed_url=str(embed.get("url") or os.environ.get(
                 "AIFORGE_EMBED_URL", "http://127.0.0.1:8764",
             )),
-            neo4j_uri=str(neo4j.get("uri") or os.environ.get(
-                "AIFORGE_NEO4J_URI", "bolt://127.0.0.1:7687",
-            )),
-            neo4j_user=str(neo4j.get("user") or os.environ.get(
-                "AIFORGE_NEO4J_USER", "neo4j",
-            )),
-            neo4j_password=str(neo4j.get("password") or os.environ.get(
-                "AIFORGE_NEO4J_PASSWORD", "password",
-            )),
+            neo4j_uri=str(neo4j.get("uri") or env_uri),
+            neo4j_user=str(neo4j.get("user") or env_user),
+            neo4j_password=str(neo4j.get("password") or env_pw),
         )
         return cfg
 

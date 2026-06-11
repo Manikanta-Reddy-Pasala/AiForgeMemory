@@ -10,8 +10,6 @@ single call.
 """
 from __future__ import annotations
 
-import os
-
 from aiforge_memory.query import bundle
 
 
@@ -27,15 +25,9 @@ def context_bundle_for(
     Caller (UnifiedContext) decides whether to fall back to its
     legacy 8-source aggregation when this returns ''.
     """
+    from aiforge_memory.core.neo4j import open_driver
     try:
-        from neo4j import GraphDatabase
-    except ImportError:
-        return ""
-    uri = os.environ.get("AIFORGE_NEO4J_URI", "bolt://127.0.0.1:7687")
-    user = os.environ.get("AIFORGE_NEO4J_USER", "neo4j")
-    pw = os.environ.get("AIFORGE_NEO4J_PASSWORD", "password")
-    try:
-        drv = GraphDatabase.driver(uri, auth=(user, pw))
+        drv = open_driver()
     except Exception:
         return ""
     try:
@@ -59,15 +51,9 @@ def context_bundle_object(
     token_budget: int = 4000,
 ) -> bundle.ContextBundle | None:
     """Same as context_bundle_for but returns the structured bundle."""
+    from aiforge_memory.core.neo4j import open_driver
     try:
-        from neo4j import GraphDatabase
-    except ImportError:
-        return None
-    uri = os.environ.get("AIFORGE_NEO4J_URI", "bolt://127.0.0.1:7687")
-    user = os.environ.get("AIFORGE_NEO4J_USER", "neo4j")
-    pw = os.environ.get("AIFORGE_NEO4J_PASSWORD", "password")
-    try:
-        drv = GraphDatabase.driver(uri, auth=(user, pw))
+        drv = open_driver()
     except Exception:
         return None
     try:

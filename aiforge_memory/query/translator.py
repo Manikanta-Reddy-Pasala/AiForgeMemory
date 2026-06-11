@@ -88,6 +88,7 @@ def translate(
     fulltext_files: list[str] = []
     candidate_symbols: list[str] = []
     file_scores: dict[str, float] = {}
+    file_texts: dict[str, str] = {}      # best chunk text per path (rerank)
     try:
         vec = _embed_query(expanded)
         rows = _vector_topk(driver, repo=repo, vec=vec, k=max(top_k * 3, 50))
@@ -97,6 +98,8 @@ def translate(
                 vector_files.append(fp)
                 file_scores[fp] = max(file_scores.get(fp, 0.0),
                                       float(r.get("score") or 0.0))
+            if fp and fp not in file_texts and r.get("text"):
+                file_texts[fp] = str(r["text"])
         candidate_symbols = _symbols_in(driver, repo=repo, files=vector_files[:top_k])
         g.used_top_k = len(rows)
     except Exception as exc:
@@ -120,11 +123,14 @@ def translate(
         k=RRF_K,
     )
 
-    # 5 — cross-encoder rerank if sidecar reachable
+    # 5 — cross-encoder rerank if sidecar reachable. Score real content
+    # (path + best matching chunk text), not the bare path string.
     if ENABLE_RERANK and candidate_files:
         try:
+            top = candidate_files[:RERANK_TOPN]
             candidate_files = _rerank(
-                query=text, docs=candidate_files[:RERANK_TOPN],
+                query=text, docs=top,
+                doc_texts=[_rerank_doc(p, file_texts) for p in top],
             ) + candidate_files[RERANK_TOPN:]
         except Exception as exc:
             g.errors.append(f"rerank: {exc}")
@@ -215,7 +221,7 @@ def _embed_query(text: str) -> list[float]:
 
 
 _VECTOR_CYPHER = """
-CALL db.index.vector.queryNodes('codemem_chunk_embed', $k, $vec)
+CALL db.index.vector.queryNodes('codemem_chunk_embed', $k_query, $vec)
 YIELD node AS c, score
 WHERE c.repo = $repo
 RETURN c.file_path AS file_path, c.text AS text, score
@@ -227,8 +233,12 @@ LIMIT $k
 def _vector_topk(driver, *, repo: str, vec: list[float], k: int) -> list[dict]:
     if not vec:
         return []
+    # Neo4j ranks the vector top-K globally and only then applies our
+    # repo WHERE — over-fetch the global stage so the repo filter still
+    # leaves ~k rows. k is already top_k*3-ish here, so 4× capped 500.
+    k_query = min(k * 4, 500)
     with driver.session() as s:
-        rows = list(s.run(_VECTOR_CYPHER, repo=repo, vec=vec, k=k))
+        rows = list(s.run(_VECTOR_CYPHER, repo=repo, vec=vec, k=k, k_query=k_query))
     return [dict(r) for r in rows]
 
 
@@ -416,15 +426,27 @@ def _path_prior(query: str, paths: list[str]) -> dict[str, float]:
     return out
 
 
-def _rerank(*, query: str, docs: list[str]) -> list[str]:
-    """Cross-encoder rerank via :8765 sidecar. Returns reordered docs.
-    Falls back to identity on failure."""
+def _rerank_doc(path: str, file_texts: dict[str, str]) -> str:
+    """Document the cross-encoder actually scores: the path plus the
+    best-matching chunk text (capped) — a bare path carries almost no
+    signal for a content model."""
+    text = (file_texts.get(path) or "").strip()
+    return f"{path}\n{text[:512]}" if text else path
+
+
+def _rerank(
+    *, query: str, docs: list[str], doc_texts: list[str] | None = None,
+) -> list[str]:
+    """Cross-encoder rerank via :8765 sidecar. Returns ``docs``
+    reordered. ``doc_texts`` (same length) is what gets scored —
+    defaults to the docs themselves. Falls back to identity on failure."""
     if not docs:
         return docs
+    payload = doc_texts if doc_texts and len(doc_texts) == len(docs) else docs
     url = DEFAULT_RERANK_URL.rstrip("/") + "/rerank"
     try:
         r = httpx.post(
-            url, json={"query": query, "texts": docs}, timeout=15.0,
+            url, json={"query": query, "texts": payload}, timeout=15.0,
         )
         r.raise_for_status()
         scores = r.json().get("scores") or []

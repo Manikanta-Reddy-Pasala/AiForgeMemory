@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from aiforge_memory.core.neo4j import vector_overfetch_k
 from aiforge_memory.query import fastpath, translator
 
 
@@ -192,6 +193,12 @@ def query(
     role: str = "doer",
     token_budget: int = 4000,
 ) -> ContextBundle:
+    """Build a ContextBundle for ``text`` scoped to ``repo``.
+
+    ``role`` is currently unused — kept for API compatibility with
+    callers (UnifiedContext) that already pass it; a future change may
+    use it to weight sections per consumer role.
+    """
     bundle = ContextBundle(repo=repo)
 
     # Fastpath
@@ -261,7 +268,9 @@ def query(
 
     # Aider Repo Map
     if file_paths:
-        bundle.repo_map = _repo_map_for(driver, repo=repo, focal_paths=file_paths)
+        bundle.repo_map = _repo_map_for(
+            driver, repo=repo, focal_paths=file_paths, errors=bundle.errors,
+        )
         if bundle.repo_map:
             bundle.sources_used.append("repo_map")
 
@@ -271,22 +280,28 @@ def query(
     anchor_syms = [s["fqname"] for s in bundle.symbols]
     # Raw code chunks for focal files (Top 5 chunks)
     if anchor_paths:
-        bundle.chunks = _chunks_for(driver, repo=repo, paths=anchor_paths[:3])
+        bundle.chunks = _chunks_for(
+            driver, repo=repo, paths=anchor_paths[:3], errors=bundle.errors,
+        )
         if bundle.chunks:
             bundle.sources_used.append("chunks")
 
     if anchor_paths or anchor_syms:
         bundle.decisions = _decisions_for(
             driver, repo=repo, paths=anchor_paths, fqnames=anchor_syms,
+            errors=bundle.errors,
         )
         bundle.observations = _observations_for(
             driver, repo=repo, paths=anchor_paths, fqnames=anchor_syms,
+            errors=bundle.errors,
         )
 
         try:
             vec = translator._embed_query(text)
             if vec:
-                vec_obs = _vector_observations(driver, repo=repo, query_vec=vec)
+                vec_obs = _vector_observations(
+                    driver, repo=repo, query_vec=vec, errors=bundle.errors,
+                )
                 # Deduplicate observations based on ID
                 existing_obs_ids = {o.get("id") for o in bundle.observations if o.get("id")}
                 for vo in vec_obs:
@@ -304,9 +319,11 @@ def query(
     if anchor_paths or anchor_syms:
         bundle.notes = _notes_for(
             driver, repo=repo, paths=anchor_paths, fqnames=anchor_syms,
+            errors=bundle.errors,
         )
         bundle.docs = _docs_for(
             driver, repo=repo, paths=anchor_paths, fqnames=anchor_syms,
+            errors=bundle.errors,
         )
         if bundle.notes:
             bundle.sources_used.append("notes")
@@ -314,54 +331,58 @@ def query(
             bundle.sources_used.append("docs")
 
     # Cross-repo edges originating or terminating at this repo
-    bundle.cross_repo = _cross_repo_for(driver, repo=repo)
+    bundle.cross_repo = _cross_repo_for(driver, repo=repo,
+                                        errors=bundle.errors)
     if bundle.cross_repo:
         bundle.sources_used.append("cross_repo")
 
-    # Token budget — drop low-priority sections if over using exact token counts
-    def _trim_to_budget():
-        if _count_tokens(bundle.render()) <= token_budget:
-            return
-        # Priority 1: drop callers/callees
-        bundle.callers = []
-        bundle.callees = []
-        if _count_tokens(bundle.render()) <= token_budget:
-            return
-
-        # Priority 2: drop cross-repo and decisions/observations
-        bundle.cross_repo = []
-        bundle.decisions = []
-        bundle.observations = []
-        bundle.notes = []
-        bundle.docs = []
-        if _count_tokens(bundle.render()) <= token_budget:
-            return
-
-        # Priority 3: trim chunks
-        bundle.chunks = bundle.chunks[:2]
-        if _count_tokens(bundle.render()) <= token_budget:
-            return
-
-        bundle.chunks = []
-        if _count_tokens(bundle.render()) <= token_budget:
-            return
-
-        # Priority 4: trim symbols and files
-        bundle.symbols = bundle.symbols[:6]
-        bundle.files = bundle.files[:4]
-        if _count_tokens(bundle.render()) <= token_budget:
-            return
-
-        # Priority 5: hard trim
-        bundle.symbols = []
-        bundle.files = []
-        bundle.services = []
-        bundle.runbook_md = bundle.runbook_md[:500]
-        bundle.conventions_md = bundle.conventions_md[:500]
-
-    _trim_to_budget()
+    _trim_to_budget(bundle, token_budget)
 
     return bundle
+
+
+def _trim_to_budget(bundle: ContextBundle, token_budget: int) -> None:
+    """Drop low-priority sections until the rendered bundle fits the
+    token budget (exact token counts)."""
+    if _count_tokens(bundle.render()) <= token_budget:
+        return
+    # Priority 1: drop callers/callees
+    bundle.callers = []
+    bundle.callees = []
+    if _count_tokens(bundle.render()) <= token_budget:
+        return
+
+    # Priority 2: trim chunks — raw code is re-readable from disk,
+    # memory facts (decisions/observations/notes) are not.
+    bundle.chunks = bundle.chunks[:2]
+    if _count_tokens(bundle.render()) <= token_budget:
+        return
+
+    bundle.chunks = []
+    if _count_tokens(bundle.render()) <= token_budget:
+        return
+
+    # Priority 3: drop cross-repo and decisions/observations
+    bundle.cross_repo = []
+    bundle.decisions = []
+    bundle.observations = []
+    bundle.notes = []
+    bundle.docs = []
+    if _count_tokens(bundle.render()) <= token_budget:
+        return
+
+    # Priority 4: trim symbols and files
+    bundle.symbols = bundle.symbols[:6]
+    bundle.files = bundle.files[:4]
+    if _count_tokens(bundle.render()) <= token_budget:
+        return
+
+    # Priority 5: hard trim
+    bundle.symbols = []
+    bundle.files = []
+    bundle.services = []
+    bundle.runbook_md = bundle.runbook_md[:500]
+    bundle.conventions_md = bundle.conventions_md[:500]
 
 
 def _services_rows(driver, *, repo: str, names: list[str]) -> list[dict]:
@@ -451,7 +472,10 @@ def _repo_docs_for(driver, *, repo: str) -> tuple[str, str]:
     return "", ""
 
 
-def _repo_map_for(driver, *, repo: str, focal_paths: list[str]) -> str:
+def _repo_map_for(
+    driver, *, repo: str, focal_paths: list[str],
+    errors: list[str] | None = None,
+) -> str:
     # Build a simple tree-like string of files and symbols for focal paths
     cy = (
         "MATCH (f:File_v2 {repo:$repo}) "
@@ -469,11 +493,16 @@ def _repo_map_for(driver, *, repo: str, focal_paths: list[str]) -> str:
                     if sym:
                         lines.append(f"  - {sym.split('::')[-1]}")
         return "\n".join(lines)
-    except Exception:
+    except Exception as exc:
+        if errors is not None:
+            errors.append(f"repo_map: {exc}")
         return ""
 
 
-def _chunks_for(driver, *, repo: str, paths: list[str], limit: int = 5) -> list[dict]:
+def _chunks_for(
+    driver, *, repo: str, paths: list[str], limit: int = 5,
+    errors: list[str] | None = None,
+) -> list[dict]:
     if not paths:
         return []
     cy = (
@@ -485,12 +514,15 @@ def _chunks_for(driver, *, repo: str, paths: list[str], limit: int = 5) -> list[
     try:
         with driver.session() as s:
             return [dict(r) for r in s.run(cy, repo=repo, paths=paths, limit=limit)]
-    except Exception:
+    except Exception as exc:
+        if errors is not None:
+            errors.append(f"chunks: {exc}")
         return []
 
 
 def _decisions_for(
     driver, *, repo: str, paths: list[str], fqnames: list[str], limit: int = 5,
+    errors: list[str] | None = None,
 ) -> list[dict]:
     """Decisions whose MENTIONS edges land on any anchor file/symbol,
     OR are repo-wide and active. Newest first."""
@@ -516,12 +548,15 @@ def _decisions_for(
                 cy, repo=repo, paths=paths or [""],
                 fqnames=fqnames or [""], limit=limit,
             )]
-    except Exception:
+    except Exception as exc:
+        if errors is not None:
+            errors.append(f"decisions: {exc}")
         return []
 
 
 def _vector_observations(
     driver, *, repo: str, query_vec: list[float], k: int = 5,
+    errors: list[str] | None = None,
 ) -> list[dict]:
     """Pull the bundle's vector-recalled observations.
 
@@ -541,11 +576,15 @@ def _vector_observations(
         )
         if rows:
             return rows
-    except Exception:
-        pass  # fall through to vanilla recall
+    except Exception as exc:
+        # fall through to vanilla recall
+        if errors is not None:
+            errors.append(f"vector_observations(ppr): {exc}")
 
+    # Over-fetch the global vector stage — Neo4j filters repo *after*
+    # ranking, so $k alone can come back empty on multi-repo graphs.
     cy = (
-        "CALL db.index.vector.queryNodes('codemem_observation_embed', $k, $vec) "
+        "CALL db.index.vector.queryNodes('codemem_observation_embed', $k_query, $vec) "
         "YIELD node AS o, score "
         "WHERE o.repo = $repo "
         "RETURN o.id AS id, coalesce(o.kind,'note') AS kind, "
@@ -554,13 +593,19 @@ def _vector_observations(
     )
     try:
         with driver.session() as s:
-            return [dict(r) for r in s.run(cy, repo=repo, vec=query_vec, k=k)]
-    except Exception:
+            return [dict(r) for r in s.run(
+                cy, repo=repo, vec=query_vec,
+                k=k, k_query=vector_overfetch_k(k),
+            )]
+    except Exception as exc:
+        if errors is not None:
+            errors.append(f"vector_observations: {exc}")
         return []
 
 
 def _observations_for(
     driver, *, repo: str, paths: list[str], fqnames: list[str], limit: int = 5,
+    errors: list[str] | None = None,
 ) -> list[dict]:
     """Observations linked to anchor files/symbols. Vector recall is
     handled by translator; here we use direct MENTIONS edges only."""
@@ -580,13 +625,16 @@ def _observations_for(
                 cy, repo=repo, paths=paths or [""],
                 fqnames=fqnames or [""], limit=limit,
             )]
-    except Exception:
+    except Exception as exc:
+        if errors is not None:
+            errors.append(f"observations: {exc}")
         return []
 
 
 
 def _notes_for(
     driver, *, repo: str, paths: list[str], fqnames: list[str], limit: int = 5,
+    errors: list[str] | None = None,
 ) -> list[dict]:
     if not paths and not fqnames:
         return []
@@ -605,12 +653,15 @@ def _notes_for(
             return [dict(r) for r in s.run(
                 cy, repo=repo, paths=paths, fqnames=fqnames, limit=limit,
             )]
-    except Exception:
+    except Exception as exc:
+        if errors is not None:
+            errors.append(f"notes: {exc}")
         return []
 
 
 def _docs_for(
     driver, *, repo: str, paths: list[str], fqnames: list[str], limit: int = 5,
+    errors: list[str] | None = None,
 ) -> list[dict]:
     if not paths and not fqnames:
         return []
@@ -629,10 +680,16 @@ def _docs_for(
             return [dict(r) for r in s.run(
                 cy, repo=repo, paths=paths, fqnames=fqnames, limit=limit,
             )]
-    except Exception:
+    except Exception as exc:
+        if errors is not None:
+            errors.append(f"docs: {exc}")
         return []
 
-def _cross_repo_for(driver, *, repo: str, limit: int = 8) -> list[dict]:
+
+def _cross_repo_for(
+    driver, *, repo: str, limit: int = 8,
+    errors: list[str] | None = None,
+) -> list[dict]:
     """Edges where this repo is on either side. Highest confidence first."""
     cy = (
         "MATCH (a:Repo)-[r:CALLS_REPO]->(b:Repo) "
@@ -645,5 +702,7 @@ def _cross_repo_for(driver, *, repo: str, limit: int = 8) -> list[dict]:
     try:
         with driver.session() as s:
             return [dict(r) for r in s.run(cy, repo=repo, limit=limit)]
-    except Exception:
+    except Exception as exc:
+        if errors is not None:
+            errors.append(f"cross_repo: {exc}")
         return []

@@ -6,71 +6,88 @@ Public surface:
 
 Both idempotent. Stale edges of the same type for files in the
 ingest set are pruned before re-inserting.
+
+Writes are batched (``UNWIND $rows`` in slices of ``_BATCH``) — one
+Cypher round trip per 500 rows instead of one per row.
 """
 from __future__ import annotations
 
 from aiforge_memory.features.symbol.extract import WalkedFile
 from aiforge_memory.features.symbol.extract_calls import CallEdge
 
-_UPSERT_FILE = """
-MERGE (f:File_v2 {repo: $repo, path: $path})
-SET f.hash         = $hash,
-    f.lang         = $lang,
-    f.lines        = $lines,
-    f.parse_error  = $parse_error,
+_BATCH = 500
+
+_UPSERT_FILES = """
+UNWIND $rows AS r
+MERGE (f:File_v2 {repo: $repo, path: r.path})
+SET f.hash         = r.hash,
+    f.lang         = r.lang,
+    f.lines        = r.lines,
+    f.parse_error  = r.parse_error,
     f.indexed_at   = datetime(),
     f.schema_version = 'codemem-v1'
 """
 
-_UPSERT_SYMBOL = """
-MERGE (s:Symbol_v2 {repo: $repo, fqname: $fqname})
-SET s.kind            = $kind,
-    s.file_path       = $file_path,
-    s.signature       = $signature,
-    s.doc_first_line  = $doc_first_line,
-    s.line_start      = $line_start,
-    s.line_end        = $line_end,
-    s.visibility      = $visibility,
-    s.modifiers       = $modifiers,
-    s.return_type     = $return_type,
-    s.params_json     = $params_json,
-    s.deprecated      = $deprecated,
+_UPSERT_SYMBOLS = """
+UNWIND $rows AS r
+MERGE (s:Symbol_v2 {repo: $repo, fqname: r.fqname})
+SET s.kind            = r.kind,
+    s.file_path       = r.file_path,
+    s.signature       = r.signature,
+    s.doc_first_line  = r.doc_first_line,
+    s.line_start      = r.line_start,
+    s.line_end        = r.line_end,
+    s.visibility      = r.visibility,
+    s.modifiers       = r.modifiers,
+    s.return_type     = r.return_type,
+    s.params_json     = r.params_json,
+    s.deprecated      = r.deprecated,
     s.schema_version  = 'codemem-v1'
-WITH s
-MATCH (f:File_v2 {repo: $repo, path: $file_path})
+WITH s, r
+MATCH (f:File_v2 {repo: $repo, path: r.file_path})
 MERGE (f)-[:DEFINES]->(s)
 """
 
 _PRUNE_FILE_SYMBOLS = """
-MATCH (f:File_v2 {repo: $repo, path: $path})-[r:DEFINES]->(s:Symbol_v2)
-WHERE NOT s.fqname IN $fqnames
+UNWIND $rows AS r
+MATCH (f:File_v2 {repo: $repo, path: r.path})-[:DEFINES]->(s:Symbol_v2)
+WHERE NOT s.fqname IN r.fqnames
 DETACH DELETE s
 """
 
 _PRUNE_FILE_IMPORTS = """
-MATCH (f:File_v2 {repo: $repo, path: $path})-[r:IMPORTS]->()
+UNWIND $paths AS p
+MATCH (f:File_v2 {repo: $repo, path: p})-[r:IMPORTS]->()
 DELETE r
 """
 
-_UPSERT_IMPORT_EDGE = """
-MATCH (f:File_v2 {repo: $repo, path: $from_path})
-MERGE (g:File_v2 {repo: $repo, path: $to_path})
+_UPSERT_IMPORT_EDGES = """
+UNWIND $rows AS r
+MATCH (f:File_v2 {repo: $repo, path: r.from_path})
+MERGE (g:File_v2 {repo: $repo, path: r.to_path})
 ON CREATE SET g.schema_version = 'codemem-v1'
 MERGE (f)-[:IMPORTS]->(g)
 """
 
 _PRUNE_FILE_CALLS = """
+UNWIND $paths AS p
 MATCH (s:Symbol_v2 {repo: $repo})-[r:CALLS]->()
-WHERE s.file_path = $path
+WHERE s.file_path = p
 DELETE r
 """
 
-_UPSERT_CALL = """
-MATCH (a:Symbol_v2 {repo: $repo, fqname: $caller})
-MATCH (b:Symbol_v2 {repo: $repo, fqname: $callee})
-MERGE (a)-[r:CALLS]->(b)
-SET r.confidence = $confidence
+_UPSERT_CALLS = """
+UNWIND $rows AS r
+MATCH (a:Symbol_v2 {repo: $repo, fqname: r.caller})
+MATCH (b:Symbol_v2 {repo: $repo, fqname: r.callee})
+MERGE (a)-[rel:CALLS]->(b)
+SET rel.confidence = r.confidence
 """
+
+
+def _batched(rows: list, n: int = _BATCH):
+    for i in range(0, len(rows), n):
+        yield rows[i:i + n]
 
 
 def upsert_files_and_symbols(
@@ -80,50 +97,56 @@ def upsert_files_and_symbols(
 
     file_paths_set = {wf.path for wf in walked_files}
 
-    with driver.session() as sess:
-        for wf in walked_files:
-            sess.run(
-                _UPSERT_FILE,
-                repo=repo, path=wf.path, hash=wf.hash,
-                lang=wf.lang, lines=wf.lines, parse_error=wf.parse_error,
-            ).consume()
-            counts["files"] += 1
+    file_rows = [
+        {"path": wf.path, "hash": wf.hash, "lang": wf.lang,
+         "lines": wf.lines, "parse_error": wf.parse_error}
+        for wf in walked_files
+    ]
+    prune_rows = [
+        {"path": wf.path, "fqnames": [s.fqname for s in wf.symbols]}
+        for wf in walked_files
+    ]
+    symbol_rows = [
+        {"fqname": sym.fqname, "kind": sym.kind,
+         "file_path": sym.file_path, "signature": sym.signature,
+         "doc_first_line": sym.doc_first_line,
+         "line_start": sym.line_start, "line_end": sym.line_end,
+         "visibility": getattr(sym, "visibility", "") or "",
+         "modifiers": list(getattr(sym, "modifiers", []) or []),
+         "return_type": getattr(sym, "return_type", "") or "",
+         "params_json": getattr(sym, "params_json", "") or "",
+         "deprecated": bool(getattr(sym, "deprecated", False))}
+        for wf in walked_files for sym in wf.symbols
+    ]
+    import_rows = []
+    for wf in walked_files:
+        for imp in wf.imports:
+            # Resolve import to a file path in this repo's walked set
+            target = _resolve_import_to_file(imp, file_paths_set)
+            if target is None:
+                continue
+            import_rows.append({"from_path": wf.path, "to_path": target})
 
-            # Prune symbols no longer present in this file
-            fqnames = [s.fqname for s in wf.symbols]
-            r = sess.run(
-                _PRUNE_FILE_SYMBOLS,
-                repo=repo, path=wf.path, fqnames=fqnames,
-            ).consume()
+    with driver.session() as sess:
+        for batch in _batched(file_rows):
+            sess.run(_UPSERT_FILES, repo=repo, rows=batch).consume()
+            counts["files"] += len(batch)
+
+        # Prune symbols no longer present in each file
+        for batch in _batched(prune_rows):
+            r = sess.run(_PRUNE_FILE_SYMBOLS, repo=repo, rows=batch).consume()
             counts["pruned_symbols"] += r.counters.nodes_deleted
 
-            for sym in wf.symbols:
-                sess.run(
-                    _UPSERT_SYMBOL,
-                    repo=repo, fqname=sym.fqname, kind=sym.kind,
-                    file_path=sym.file_path, signature=sym.signature,
-                    doc_first_line=sym.doc_first_line,
-                    line_start=sym.line_start, line_end=sym.line_end,
-                    visibility=getattr(sym, "visibility", "") or "",
-                    modifiers=list(getattr(sym, "modifiers", []) or []),
-                    return_type=getattr(sym, "return_type", "") or "",
-                    params_json=getattr(sym, "params_json", "") or "",
-                    deprecated=bool(getattr(sym, "deprecated", False)),
-                ).consume()
-                counts["symbols"] += 1
+        for batch in _batched(symbol_rows):
+            sess.run(_UPSERT_SYMBOLS, repo=repo, rows=batch).consume()
+            counts["symbols"] += len(batch)
 
-            # Prune + re-insert imports
-            sess.run(_PRUNE_FILE_IMPORTS, repo=repo, path=wf.path).consume()
-            for imp in wf.imports:
-                # Resolve import to a file path in this repo's walked set
-                target = _resolve_import_to_file(imp, file_paths_set)
-                if target is None:
-                    continue
-                sess.run(
-                    _UPSERT_IMPORT_EDGE,
-                    repo=repo, from_path=wf.path, to_path=target,
-                ).consume()
-                counts["imports"] += 1
+        # Prune + re-insert imports
+        for batch in _batched([wf.path for wf in walked_files]):
+            sess.run(_PRUNE_FILE_IMPORTS, repo=repo, paths=batch).consume()
+        for batch in _batched(import_rows):
+            sess.run(_UPSERT_IMPORT_EDGES, repo=repo, rows=batch).consume()
+            counts["imports"] += len(batch)
 
     return counts
 
@@ -136,18 +159,20 @@ def upsert_call_edges(
     then insert the new edges."""
     counts = {"calls": 0}
 
+    edge_rows = [
+        {"caller": e.caller_fqname, "callee": e.callee_fqname,
+         "confidence": e.confidence}
+        for e in edges
+    ]
+
     with driver.session() as sess:
         # prune stale CALLS for each file
-        for path in file_paths:
-            sess.run(_PRUNE_FILE_CALLS, repo=repo, path=path).consume()
+        for batch in _batched(list(file_paths)):
+            sess.run(_PRUNE_FILE_CALLS, repo=repo, paths=batch).consume()
 
-        for e in edges:
-            sess.run(
-                _UPSERT_CALL,
-                repo=repo, caller=e.caller_fqname,
-                callee=e.callee_fqname, confidence=e.confidence,
-            ).consume()
-            counts["calls"] += 1
+        for batch in _batched(edge_rows):
+            sess.run(_UPSERT_CALLS, repo=repo, rows=batch).consume()
+            counts["calls"] += len(batch)
 
     return counts
 

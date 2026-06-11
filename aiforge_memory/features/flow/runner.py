@@ -128,22 +128,30 @@ def ingest_repo(
         )
         calls_count = ccounts["calls"]
 
-    # Stage 6 — file summaries
+    # Stage 6 — file summaries. Only re-summarize files whose content
+    # changed since the last ingest (state-db merkle hash) or that have
+    # no summary in the graph yet — a full ingest on an already-indexed
+    # repo otherwise re-runs the LLM over every file.
     summaries_updated = summaries_skipped = 0
     if not skip_summaries and walked:
-        summaries = file_summary.summarize_files(
-            walked, repo=repo_name, repo_root=repo_path,
+        to_summarize = _files_needing_summary(
+            walked, driver=driver, state_conn=state_conn, repo=repo_name,
         )
-        sumcounts = file_summary_writer.write_summaries(
-            driver, repo=repo_name, summaries=summaries,
-        )
-        summaries_updated = sumcounts["updated"]
-        summaries_skipped = sumcounts["skipped"]
+        if to_summarize:
+            summaries = file_summary.summarize_files(
+                to_summarize, repo=repo_name, repo_root=repo_path,
+            )
+            sumcounts = file_summary_writer.write_summaries(
+                driver, repo=repo_name, summaries=summaries,
+            )
+            summaries_updated = sumcounts["updated"]
+            summaries_skipped = sumcounts["skipped"]
 
     # Stage 7 — chunk embeddings
     chunks_count = 0
+    embed_failed: list[str] = []
     if not skip_chunks and walked:
-        chunks = embed.chunk_and_embed(
+        chunks, embed_failed = embed.chunk_and_embed(
             walked, repo=repo_name, repo_root=repo_path,
         )
         if chunks:
@@ -155,10 +163,14 @@ def ingest_repo(
     sdb.set_repo_pack_sha(state_conn, repo=repo_name, pack_sha=sha)
     # Persist per-file hashes + git head so subsequent --delta runs have
     # state to diff against. Without this, delta hits cold_start every time.
+    # Files whose embed failed keep no/stale hash so the next delta
+    # retries them.
     if walked:
+        failed = set(embed_failed)
         sdb.upsert_file_hashes(
             state_conn, repo=repo_name,
-            hashes={wf.path: wf.hash for wf in walked},
+            hashes={wf.path: wf.hash for wf in walked
+                    if wf.path not in failed},
         )
     try:
         gmeta = git_meta.read(repo_path)
@@ -181,6 +193,31 @@ def ingest_repo(
         summaries_skipped=summaries_skipped,
         chunks_count=chunks_count,
     )
+
+
+def _files_needing_summary(walked, *, driver, state_conn, repo):
+    """Subset of ``walked`` whose hash changed since the previous ingest
+    or whose File_v2 node has no (non-empty) summary yet. Best-effort:
+    any lookup failure falls back to summarizing everything (the prior
+    behaviour)."""
+    try:
+        prev_hashes = sdb.get_file_hashes(state_conn, repo=repo)
+        if not prev_hashes:
+            return walked
+        cy = (
+            "MATCH (f:File_v2 {repo:$repo}) "
+            "WHERE f.summary IS NOT NULL AND f.summary <> '' "
+            "RETURN f.path AS path"
+        )
+        with driver.session() as s:
+            summarized = {r["path"] for r in s.run(cy, repo=repo)}
+        return [
+            wf for wf in walked
+            if prev_hashes.get(wf.path) != wf.hash
+            or wf.path not in summarized
+        ]
+    except Exception:  # noqa: BLE001 — skip-optimisation is best-effort
+        return walked
 
 
 def _merge_calls(primary, secondary):

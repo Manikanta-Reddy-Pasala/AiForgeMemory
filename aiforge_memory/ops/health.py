@@ -55,13 +55,11 @@ def check_all() -> HealthReport:
 
 
 def _check_neo4j() -> CheckResult:
-    uri = os.environ.get("AIFORGE_NEO4J_URI", "bolt://127.0.0.1:7687")
-    user = os.environ.get("AIFORGE_NEO4J_USER", "neo4j")
-    pw = os.environ.get("AIFORGE_NEO4J_PASSWORD", "password")
+    from aiforge_memory.core.neo4j import neo4j_settings, open_driver
+    uri, _, _ = neo4j_settings()
     t0 = time.perf_counter()
     try:
-        from neo4j import GraphDatabase
-        drv = GraphDatabase.driver(uri, auth=(user, pw))
+        drv = open_driver()
         try:
             with drv.session() as s:
                 s.run("RETURN 1").consume()
@@ -77,9 +75,11 @@ def _check_neo4j() -> CheckResult:
 
 
 def _check_lm() -> CheckResult:
+    # Same env chain + default as translator.py / file/extract.py —
+    # the probe must watch the endpoint ingest actually talks to.
     url = os.environ.get(
         "AIFORGE_CODEMEM_LM_URL",
-        os.environ.get("AIFORGE_INTENT_LM_URL", "http://127.0.0.1:1234/v1"),
+        os.environ.get("AIFORGE_INTENT_LM_URL", "http://127.0.0.1:1235/v1"),
     )
     probe = url.rstrip("/") + "/models"
     t0 = time.perf_counter()

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import mimetypes
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -207,15 +206,12 @@ def build_app():
             "fastapi not installed. Run: uv pip install '.[ui]'"
         )
 
-    from neo4j import GraphDatabase
+    from aiforge_memory.core.neo4j import open_driver
 
     app = FastAPI(title="AiForgeMemory UI", docs_url="/docs", redoc_url=None)
 
     def _driver():
-        uri = os.environ.get("AIFORGE_NEO4J_URI", "bolt://127.0.0.1:7687")
-        user = os.environ.get("AIFORGE_NEO4J_USER", "neo4j")
-        pw = os.environ.get("AIFORGE_NEO4J_PASSWORD", "password")
-        return GraphDatabase.driver(uri, auth=(user, pw))
+        return open_driver()
 
     # ── HTML ─────────────────────────────────────────────────────────
 

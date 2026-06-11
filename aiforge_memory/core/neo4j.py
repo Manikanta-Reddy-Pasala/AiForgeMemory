@@ -12,7 +12,56 @@ adds its own missing pieces.
 """
 from __future__ import annotations
 
+import os
+
 _REPO_NAME_CONSTRAINT_NAME = "codemem_repo_name_unique"
+
+
+# ─── Connection ───────────────────────────────────────────────────────
+
+def neo4j_settings() -> tuple[str, str, str]:
+    """Resolve (uri, user, password) from env at call time.
+
+    AIFORGE_NEO4J_* wins, plain NEO4J_* is the fallback, then the local
+    dev defaults. Single source of truth — every module that opens a
+    driver goes through here (or :func:`open_driver`)."""
+    uri = os.environ.get(
+        "AIFORGE_NEO4J_URI",
+        os.environ.get("NEO4J_URI", "bolt://127.0.0.1:7687"),
+    )
+    user = os.environ.get(
+        "AIFORGE_NEO4J_USER",
+        os.environ.get("NEO4J_USER", "neo4j"),
+    )
+    pw = os.environ.get(
+        "AIFORGE_NEO4J_PASSWORD",
+        os.environ.get("NEO4J_PASSWORD", "password"),
+    )
+    return uri, user, pw
+
+
+def open_driver():
+    """Open a Neo4j driver from env config. Errors propagate to caller."""
+    from neo4j import GraphDatabase
+
+    uri, user, pw = neo4j_settings()
+    return GraphDatabase.driver(uri, auth=(user, pw))
+
+
+# ─── Vector over-fetch ────────────────────────────────────────────────
+#
+# Neo4j 5.x has no filtered vector search: db.index.vector.queryNodes()
+# ranks the top-K *globally*, and only afterwards does our WHERE clause
+# drop other repos' rows. With many repos in one graph a small k can
+# return zero same-repo hits. Fix = over-fetch the global stage and keep
+# the final LIMIT at the caller's k.
+
+def vector_overfetch_k(k: int, *, cap: int = 500) -> int:
+    """Global fetch size for a repo-filtered vector query that should
+    yield ~``k`` rows after the repo filter. ``AIFORGE_VECTOR_OVERFETCH``
+    (default 10) scales it; capped (default 500) to bound index work."""
+    overfetch = int(os.environ.get("AIFORGE_VECTOR_OVERFETCH", "10"))
+    return min(max(k, 1) * max(overfetch, 1), cap)
 
 _INDEX_STATEMENTS: list[str] = [
     # B-tree index on last_indexed_at for stats
@@ -45,11 +94,6 @@ _INDEX_STATEMENTS: list[str] = [
     # Chunk_v2 — keyed on globally unique id (file_path + offset)
     "CREATE CONSTRAINT codemem_chunk_unique IF NOT EXISTS "
     "FOR (c:Chunk_v2) REQUIRE c.id IS UNIQUE",
-    # Vector index for top-K retrieval (bge-m3 1024d cosine)
-    "CREATE VECTOR INDEX codemem_chunk_embed IF NOT EXISTS "
-    "FOR (c:Chunk_v2) ON c.embed_vec "
-    "OPTIONS {indexConfig: {`vector.dimensions`: 1024, "
-    "                        `vector.similarity_function`: 'cosine'}}",
 
     # ── Memory layer (Decision_v2 / Observation_v2 / Note_v2) ─────────
     # Decisions: durable architectural / process choices ("we picked X over Y")
@@ -69,13 +113,12 @@ _INDEX_STATEMENTS: list[str] = [
     "FOR (o:Observation_v2) ON (o.repo, o.created_at)",
     "CREATE INDEX codemem_observation_kind IF NOT EXISTS "
     "FOR (o:Observation_v2) ON (o.repo, o.kind)",
+    # Dedupe lookup key — short sha256 of text (see memory/store.py);
+    # avoids the O(n) {repo, text} scan on every upsert.
+    "CREATE INDEX codemem_observation_text_hash IF NOT EXISTS "
+    "FOR (o:Observation_v2) ON (o.repo, o.text_hash)",
     "CREATE FULLTEXT INDEX codemem_observation_ft IF NOT EXISTS "
     "FOR (o:Observation_v2) ON EACH [o.text, o.tags_text]",
-    # Vector recall over observations (1024d bge-m3)
-    "CREATE VECTOR INDEX codemem_observation_embed IF NOT EXISTS "
-    "FOR (o:Observation_v2) ON o.embed_vec "
-    "OPTIONS {indexConfig: {`vector.dimensions`: 1024, "
-    "                        `vector.similarity_function`: 'cosine'}}",
 
     # Notes: free-form memos, README-like; lightweight (no embed required)
     "CREATE CONSTRAINT codemem_note_unique IF NOT EXISTS "
@@ -109,6 +152,37 @@ _INDEX_STATEMENTS: list[str] = [
 ]
 
 
+def _vector_index_statements(dim: int) -> list[str]:
+    """Vector indexes for chunk + observation recall. The dimension
+    follows the embed sidecar config (AIFORGE_EMBED_DIM, default 1024
+    for bge-m3) instead of being hardcoded — see ``embed_config()`` in
+    features/chunk/embed.py."""
+    return [
+        # Vector index for top-K retrieval (cosine)
+        "CREATE VECTOR INDEX codemem_chunk_embed IF NOT EXISTS "
+        "FOR (c:Chunk_v2) ON c.embed_vec "
+        f"OPTIONS {{indexConfig: {{`vector.dimensions`: {dim}, "
+        "                        `vector.similarity_function`: 'cosine'}}",
+        # Vector recall over observations
+        "CREATE VECTOR INDEX codemem_observation_embed IF NOT EXISTS "
+        "FOR (o:Observation_v2) ON o.embed_vec "
+        f"OPTIONS {{indexConfig: {{`vector.dimensions`: {dim}, "
+        "                        `vector.similarity_function`: 'cosine'}}",
+    ]
+
+
+def _embed_dim() -> int:
+    """Resolve the embedding dimension from the same config the chunk
+    embedder uses. Falls back to the env var directly (then 1024) if
+    the feature module can't load — schema apply must never fail on a
+    missing optional dependency."""
+    try:
+        from aiforge_memory.features.chunk.embed import embed_config
+        return int(embed_config()["dim"])
+    except Exception:  # noqa: BLE001
+        return int(os.environ.get("AIFORGE_EMBED_DIM", "1024"))
+
+
 def _repo_name_constraint_exists(session) -> str | None:
     """Return the name of any uniqueness constraint on (:Repo {name}), or None."""
     rows = list(session.run(
@@ -133,6 +207,6 @@ def apply(driver) -> None:
                 "FOR (r:Repo) REQUIRE r.name IS UNIQUE"
             ).consume()
 
-    for stmt in _INDEX_STATEMENTS:
+    for stmt in _INDEX_STATEMENTS + _vector_index_statements(_embed_dim()):
         with driver.session() as session:
             session.run(stmt).consume()

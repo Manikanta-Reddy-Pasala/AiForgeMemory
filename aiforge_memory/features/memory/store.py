@@ -20,11 +20,14 @@ Observation embeddings.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import time
 import uuid
 from collections.abc import Iterable
+
+from aiforge_memory.core.neo4j import vector_overfetch_k
 
 _SCHEMA_VERSION = "codemem-v1"
 
@@ -107,6 +110,7 @@ ON CREATE SET o.created_at     = datetime({epochSeconds: toInteger($now)}),
 SET o.repo        = $repo,
     o.kind        = $kind,
     o.text        = $text,
+    o.text_hash   = $text_hash,
     o.author      = $author,
     o.session_id  = $session_id,
     o.tags        = $tags,
@@ -134,8 +138,16 @@ RETURN o.id AS id
 # on tags/kind so a Learner that re-emits the same fact with a slightly
 # different tag set still collapses — losing tag drift is acceptable;
 # 3000 duplicate "README.md had 3 occurrences …" rows are not.
+#
+# Keyed on text_hash (indexed, see core/neo4j.py) so the lookup is an
+# index seek instead of an O(n) label scan over long text properties;
+# the WHERE re-verifies full text equality against hash collisions.
+# Nodes written before the text_hash migration carry no hash and won't
+# match — they pick up at most one fresh duplicate (which then becomes
+# the dedupe target); decay archives the cold legacy copy.
 _FIND_DUP_OBSERVATION = """
-MATCH (o:Observation_v2 {repo: $repo, text: $text})
+MATCH (o:Observation_v2 {repo: $repo, text_hash: $text_hash})
+WHERE o.text = $text
 RETURN o.id AS id, coalesce(o.seen_count, 1) AS seen_count
 ORDER BY o.created_at ASC
 LIMIT 1
@@ -217,6 +229,7 @@ def upsert_observation(
         with driver.session() as s:
             existing = s.run(
                 _FIND_DUP_OBSERVATION, repo=repo, text=text,
+                text_hash=_text_hash(text),
             ).single()
             if existing is not None:
                 dup_id = existing["id"]
@@ -243,6 +256,7 @@ def upsert_observation(
     entities = [e["value"] for e in extract_entities(text)]
     params = {
         "id": nid, "repo": repo, "kind": kind, "text": text,
+        "text_hash": _text_hash(text),
         "author": author, "session_id": session_id, "tags": tags,
         "tags_text": " ".join(tags),
         "embed_vec": embed_vec, "embed_model": embed_model,
@@ -440,7 +454,7 @@ def list_memory(
 
 
 _RECALL_OBSERVATION = """
-CALL db.index.vector.queryNodes('codemem_observation_embed', $k, $vec)
+CALL db.index.vector.queryNodes('codemem_observation_embed', $k_query, $vec)
 YIELD node AS o, score
 WHERE o.repo = $repo
   AND (o.status IS NULL OR o.status = 'active')
@@ -470,7 +484,8 @@ def recall_observations(
         return []
     with driver.session() as s:
         return [dict(r) for r in s.run(
-            _RECALL_OBSERVATION, repo=repo, vec=query_vec, k=k,
+            _RECALL_OBSERVATION, repo=repo, vec=query_vec,
+            k=k, k_query=vector_overfetch_k(k),
         )]
 
 
@@ -491,7 +506,8 @@ def find_semantic_dup(
         return None
     with driver.session() as s:
         row = s.run(
-            _RECALL_OBSERVATION, repo=repo, vec=embed_vec, k=1,
+            _RECALL_OBSERVATION, repo=repo, vec=embed_vec,
+            k=1, k_query=vector_overfetch_k(1),
         ).single()
     if row is None:
         return None
@@ -514,7 +530,7 @@ def find_semantic_dup(
 # can swap to ``gds.pageRank.stream`` later — same return contract.
 _RECALL_OBSERVATIONS_PPR = """
 // 1. Vector recall over Observation_v2 → seed set with score.
-CALL db.index.vector.queryNodes('codemem_observation_embed', $seed_k, $vec)
+CALL db.index.vector.queryNodes('codemem_observation_embed', $seed_k_query, $vec)
 YIELD node AS seed_node, score AS vec_score
 WHERE seed_node.repo = $repo
   AND (seed_node.status IS NULL OR seed_node.status = 'active')
@@ -615,7 +631,8 @@ def recall_observations_ppr(
         return [dict(r) for r in s.run(
             _RECALL_OBSERVATIONS_PPR,
             repo=repo, vec=query_vec,
-            seed_k=seed_k, k=k, alpha=float(alpha),
+            seed_k_query=vector_overfetch_k(seed_k),
+            k=k, alpha=float(alpha),
         )]
 
 
@@ -744,6 +761,12 @@ def _clamp01(x: float) -> float:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def _text_hash(text: str) -> str:
+    """Short sha256 of the observation text — indexed dedupe key
+    (full text equality is re-verified at lookup time)."""
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
 def _link_refs(

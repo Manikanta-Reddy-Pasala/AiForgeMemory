@@ -351,6 +351,14 @@ def _effective_timeout(rs: RepoSchedule, repo_path: str) -> tuple[int, int]:
     return min(cap, max(rs.timeout_seconds, scaled)), file_count
 
 
+# Live (timed-out but still running) worker threads keyed by repo name.
+# A timed-out tick leaves its worker here with the lock still held;
+# subsequent ticks skip with 'still_running' until the thread is
+# observed dead, at which point the lock is released. Prevents the old
+# double-ingest where the timeout branch freed the lock under a zombie.
+_LIVE_WORKERS: dict[str, object] = {}
+
+
 def tick_repo(
     rs: RepoSchedule, *, driver, state_conn, log,
 ) -> RepoStatus:
@@ -360,6 +368,9 @@ def tick_repo(
       - Per-tick wall timeout (rs.timeout_seconds) — runs the ingest in
         a worker thread, joins with timeout. Long-running stages can't
         block the loop forever.
+      - A timed-out worker keeps the per-repo lock until it is observed
+        dead (see _LIVE_WORKERS) so a zombie ingest can't overlap the
+        next tick's ingest.
       - Neo4j connection errors set status='neo4j_down' so a watchdog
         can react. Caller may apply exponential backoff.
       - LSP opt-in via rs.use_lsp.
@@ -372,6 +383,16 @@ def tick_repo(
     status = RepoStatus(name=rs.name)
     status.last_run = time.time()
     status.next_run = status.last_run + rs.interval_seconds
+
+    prior = _LIVE_WORKERS.get(rs.name)
+    if prior is not None:
+        if prior.is_alive():
+            status.last_status = "still_running"
+            log(f"[{rs.name}] timed-out worker still running; skipped")
+            return status
+        # Zombie finished since the timeout — free its lock and proceed.
+        _LIVE_WORKERS.pop(rs.name, None)
+        _release_lock(rs.name)
 
     if not _acquire_lock(rs.name):
         status.last_status = "locked"
@@ -406,6 +427,7 @@ def tick_repo(
             result_box["exc"] = exc
 
     eff_timeout, file_count = _effective_timeout(rs, rs.path)
+    worker = None
     try:
         worker = threading.Thread(target=_work, name=f"tick-{rs.name}",
                                   daemon=True)
@@ -417,9 +439,10 @@ def tick_repo(
                      if rs.per_file_seconds > 0 else "")
             status.last_error = f"tick exceeded {eff_timeout}s{scale}"
             log(f"[{rs.name}] timeout after {eff_timeout}s{scale} — "
-                "thread leaked (will be cleaned up by GC)")
-            # Worker thread keeps running but daemon=True so it dies on
-            # process exit. Lock release below frees subsequent ticks.
+                "worker kept; lock held until it is observed dead")
+            # Worker thread keeps running (daemon=True so it dies on
+            # process exit). The finally block registers it and keeps
+            # the lock so the next tick can't double-ingest.
             return status
 
         if result_box["exc"] is not None:
@@ -450,7 +473,13 @@ def tick_repo(
             f"pulled={status.last_pulled} behind={status.last_behind} "
             f"lsp={rs.use_lsp}")
     finally:
-        _release_lock(rs.name)
+        if worker is not None and worker.is_alive():
+            # Timed out — keep the lock; the registry entry lets a later
+            # tick release it once the worker is observed dead.
+            _LIVE_WORKERS[rs.name] = worker
+        else:
+            _LIVE_WORKERS.pop(rs.name, None)
+            _release_lock(rs.name)
 
     return status
 
@@ -500,6 +529,12 @@ def run_loop(
     backoff_seconds = 0
     BACKOFF_MAX = 300
 
+    # Memory decay — once per AIFORGE_DECAY_INTERVAL_S (default daily),
+    # checked at most once per sweep. First sweep runs it immediately.
+    decay_interval = int(os.environ.get("AIFORGE_DECAY_INTERVAL_S", "86400"))
+    decay_age_days = int(os.environ.get("AIFORGE_DECAY_AGE_DAYS", "30"))
+    next_decay_at = 0.0
+
     while not flag.stop:
         now = time.time()
         any_neo4j_down = False
@@ -516,6 +551,16 @@ def run_loop(
             _write_status(statuses)
             if st.last_status == "neo4j_down":
                 any_neo4j_down = True
+
+        if not flag.stop and time.time() >= next_decay_at:
+            try:
+                from aiforge_memory.features.memory import decay
+                res = decay.run_decay(driver, max_age_days=decay_age_days)
+                log(f"decay: archived={res['archived']} "
+                    f"max_age_days={res['max_age_days']}")
+            except Exception as exc:  # noqa: BLE001 — decay is best-effort
+                log(f"decay failed: {exc!r}")
+            next_decay_at = time.time() + decay_interval
 
         if any_neo4j_down:
             backoff_seconds = min(BACKOFF_MAX,
@@ -671,11 +716,8 @@ def daemon_status() -> dict:
 # ─── Defaults ─────────────────────────────────────────────────────────
 
 def _default_driver():
-    from neo4j import GraphDatabase
-    uri = os.environ.get("AIFORGE_NEO4J_URI", "bolt://127.0.0.1:7687")
-    user = os.environ.get("AIFORGE_NEO4J_USER", "neo4j")
-    pw = os.environ.get("AIFORGE_NEO4J_PASSWORD", "password")
-    return GraphDatabase.driver(uri, auth=(user, pw))
+    from aiforge_memory.core.neo4j import open_driver
+    return open_driver()
 
 
 def _default_state():
