@@ -500,6 +500,12 @@ def run_loop(
     backoff_seconds = 0
     BACKOFF_MAX = 300
 
+    # Memory decay — once per AIFORGE_DECAY_INTERVAL_S (default daily),
+    # checked at most once per sweep. First sweep runs it immediately.
+    decay_interval = int(os.environ.get("AIFORGE_DECAY_INTERVAL_S", "86400"))
+    decay_age_days = int(os.environ.get("AIFORGE_DECAY_AGE_DAYS", "30"))
+    next_decay_at = 0.0
+
     while not flag.stop:
         now = time.time()
         any_neo4j_down = False
@@ -516,6 +522,16 @@ def run_loop(
             _write_status(statuses)
             if st.last_status == "neo4j_down":
                 any_neo4j_down = True
+
+        if not flag.stop and time.time() >= next_decay_at:
+            try:
+                from aiforge_memory.features.memory import decay
+                res = decay.run_decay(driver, max_age_days=decay_age_days)
+                log(f"decay: archived={res['archived']} "
+                    f"max_age_days={res['max_age_days']}")
+            except Exception as exc:  # noqa: BLE001 — decay is best-effort
+                log(f"decay failed: {exc!r}")
+            next_decay_at = time.time() + decay_interval
 
         if any_neo4j_down:
             backoff_seconds = min(BACKOFF_MAX,

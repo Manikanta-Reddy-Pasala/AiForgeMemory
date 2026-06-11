@@ -8,6 +8,7 @@ argparse tree. Adding a new command = drop a file + one line in
 from __future__ import annotations
 
 from . import (
+    decay,
     doctor,
     forget,
     handoff,
@@ -44,6 +45,7 @@ COMMAND_MODULES = (
     recall,
     recap,
     forget,
+    decay,
     handoff,
     list_memory,
     link,
