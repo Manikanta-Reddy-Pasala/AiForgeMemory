@@ -4,7 +4,7 @@ Ported from AIForgeCrew's ``aiforge_core.memory.decay._decay_afm`` so
 the scheduler daemon (and ``aiforge-memory decay``) own the job instead
 of an external cron.
 
-Rule (KISS): archive ``Observation_v2`` / ``Decision_v2`` nodes where
+Rule (KISS): archive ``Observation_v2`` nodes where
 - ``status`` is null or ``'active'``
 - ``seen_count`` ≤ 1 — emitted once, never re-hit by the (repo, text)
   dedupe path; strong signal it wasn't reused
@@ -26,10 +26,15 @@ from __future__ import annotations
 
 import os
 
+# Observation_v2 ONLY. Decision_v2 deliberately excluded: decisions are
+# durable architecture records with NO touch path (nothing bumps their
+# seen_count/last_seen_at on recall), so age-based decay would archive
+# EVERY decision older than the threshold — and _decisions_for filters
+# archived nodes out of bundles. Revisit only if decisions ever gain a
+# touch-on-recall.
 _DECAY_CY = """
-MATCH (o)
-WHERE (o:Observation_v2 OR o:Decision_v2)
-  AND (o.status IS NULL OR o.status = 'active')
+MATCH (o:Observation_v2)
+WHERE (o.status IS NULL OR o.status = 'active')
   AND coalesce(o.seen_count, 1) <= 1
   AND o.created_at IS NOT NULL
   AND o.created_at < datetime() - duration({days: $days})

@@ -60,7 +60,10 @@ def vector_overfetch_k(k: int, *, cap: int = 500) -> int:
     """Global fetch size for a repo-filtered vector query that should
     yield ~``k`` rows after the repo filter. ``AIFORGE_VECTOR_OVERFETCH``
     (default 10) scales it; capped (default 500) to bound index work."""
-    overfetch = int(os.environ.get("AIFORGE_VECTOR_OVERFETCH", "10"))
+    try:
+        overfetch = int(os.environ.get("AIFORGE_VECTOR_OVERFETCH", "10"))
+    except ValueError:
+        overfetch = 10
     return min(max(k, 1) * max(overfetch, 1), cap)
 
 _INDEX_STATEMENTS: list[str] = [
