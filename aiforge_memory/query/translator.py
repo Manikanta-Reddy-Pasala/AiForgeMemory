@@ -68,7 +68,8 @@ def translate(
     Pipeline:
         1. _expand_query: lightweight query expansion (CamelCase split +
            known-synonym injection). Cheap, no LLM.
-        2. _vector_topk: bge-m3 embed → Cypher chunk vector top-K.
+        2. _chunk_fulltext_topk: Lucene over raw chunk text → file
+           anchors (code-chunk vectors removed 2026-06-11).
         3. _fulltext_symbols: Lucene over Symbol_v2.signature.
         4. RRF fuse the two ranked file lists + path-prior bonus.
         5. _rerank (optional): cross-encoder rerank top-N to top-K.
@@ -90,8 +91,8 @@ def translate(
     file_scores: dict[str, float] = {}
     file_texts: dict[str, str] = {}      # best chunk text per path (rerank)
     try:
-        vec = _embed_query(expanded)
-        rows = _vector_topk(driver, repo=repo, vec=vec, k=max(top_k * 3, 50))
+        rows = _chunk_fulltext_topk(
+            driver, repo=repo, text=expanded, k=max(top_k * 3, 50))
         for r in rows:
             fp = r.get("file_path")
             if fp and fp not in vector_files:
@@ -213,15 +214,8 @@ def translate(
     return g
 
 
-def _embed_query(text: str) -> list[float]:
-    url = DEFAULT_EMBED_URL.rstrip("/") + "/embed"
-    r = httpx.post(url, json={"text": text}, timeout=10.0)
-    r.raise_for_status()
-    return [float(x) for x in r.json().get("embedding", [])]
-
-
-_VECTOR_CYPHER = """
-CALL db.index.vector.queryNodes('codemem_chunk_embed', $k_query, $vec)
+_CHUNK_FT_CYPHER = """
+CALL db.index.fulltext.queryNodes('codemem_chunk_text_ft', $q, {limit: $k_query})
 YIELD node AS c, score
 WHERE c.repo = $repo
 RETURN c.file_path AS file_path, c.text AS text, score
@@ -230,15 +224,22 @@ LIMIT $k
 """
 
 
-def _vector_topk(driver, *, repo: str, vec: list[float], k: int) -> list[dict]:
-    if not vec:
+def _chunk_fulltext_topk(driver, *, repo: str, text: str, k: int) -> list[dict]:
+    """NL→file anchoring via Lucene over raw chunk text.
+
+    Replaces the removed code-chunk vector recall: same row shape
+    (file_path, text, score) so RRF/rerank downstream is untouched —
+    at zero embed cost and zero index staleness beyond the last ingest.
+    """
+    tokens = _tokenize_for_fulltext(text)
+    if not tokens:
         return []
-    # Neo4j ranks the vector top-K globally and only then applies our
-    # repo WHERE — over-fetch the global stage so the repo filter still
-    # leaves ~k rows. k is already top_k*3-ish here, so 4× capped 500.
+    q = " OR ".join(_escape_lucene(tok) for tok in tokens)
+    # Lucene ranks globally; over-fetch so the repo filter leaves ~k.
     k_query = min(k * 4, 500)
     with driver.session() as s:
-        rows = list(s.run(_VECTOR_CYPHER, repo=repo, vec=vec, k=k, k_query=k_query))
+        rows = list(s.run(_CHUNK_FT_CYPHER, repo=repo, q=q, k=k,
+                          k_query=k_query))
     return [dict(r) for r in rows]
 
 

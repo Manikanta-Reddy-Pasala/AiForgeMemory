@@ -99,7 +99,7 @@ def test_call_edges_use_unwind_batches():
 def test_chunks_use_unwind_batches():
     drv = _FakeDriver()
     chunks = [WalkedChunk(id=f"id{i}", repo="t", file_path="a.py",
-                          text="x", embed_vec=[0.1])
+                          text="x")
               for i in range(20)]
     counts = chunk_store.upsert_chunks(drv, repo="t", chunks=chunks)
     assert counts["chunks"] == 20

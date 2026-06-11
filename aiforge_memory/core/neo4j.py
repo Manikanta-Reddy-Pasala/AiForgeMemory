@@ -136,6 +136,10 @@ _INDEX_STATEMENTS: list[str] = [
     "FOR (d:Doc_v2) REQUIRE d.id IS UNIQUE",
     "CREATE INDEX codemem_doc_repo IF NOT EXISTS "
     "FOR (d:Doc_v2) ON (d.repo, d.source_kind)",
+    # NL→file anchoring over raw chunk text (replaces the removed
+    # codemem_chunk_embed vector index).
+    "CREATE FULLTEXT INDEX codemem_chunk_text_ft IF NOT EXISTS "
+    "FOR (c:Chunk_v2) ON EACH [c.text]",
     "CREATE FULLTEXT INDEX codemem_doc_ft IF NOT EXISTS "
     "FOR (d:Doc_v2) ON EACH [d.title, d.body, d.url]",
 
@@ -161,12 +165,11 @@ def _vector_index_statements(dim: int) -> list[str]:
     for bge-m3) instead of being hardcoded — see ``embed_config()`` in
     features/chunk/embed.py."""
     return [
-        # Vector index for top-K retrieval (cosine)
-        "CREATE VECTOR INDEX codemem_chunk_embed IF NOT EXISTS "
-        "FOR (c:Chunk_v2) ON c.embed_vec "
-        f"OPTIONS {{indexConfig: {{`vector.dimensions`: {dim}, "
-        "                        `vector.similarity_function`: 'cosine'}}",
-        # Vector recall over observations
+        # Vector recall over observations — the ONLY vector index.
+        # Code-chunk vectors were removed (2026-06-11): NL→file anchoring
+        # now rides the codemem_chunk_text_ft fulltext index; embedding
+        # code was the slowest ingest stage and its only consumer was
+        # that anchoring path.
         "CREATE VECTOR INDEX codemem_observation_embed IF NOT EXISTS "
         "FOR (o:Observation_v2) ON o.embed_vec "
         f"OPTIONS {{indexConfig: {{`vector.dimensions`: {dim}, "
@@ -213,3 +216,9 @@ def apply(driver) -> None:
     for stmt in _INDEX_STATEMENTS + _vector_index_statements(_embed_dim()):
         with driver.session() as session:
             session.run(stmt).consume()
+
+    # Migration: drop the removed code-chunk vector index on deployed
+    # graphs (idempotent; embed_vec node properties are left in place —
+    # harmless dead weight that delta re-ingest gradually rewrites).
+    with driver.session() as session:
+        session.run("DROP INDEX codemem_chunk_embed IF EXISTS").consume()

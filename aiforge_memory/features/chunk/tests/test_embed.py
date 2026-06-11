@@ -2,14 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
-
-import pytest
 
 from aiforge_memory.features.chunk import embed as em
 from aiforge_memory.features.symbol.extract import WalkedFile, WalkedSymbol
-
-pytestmark = pytest.mark.usefixtures("no_live_sidecar")
 
 FIX = (
     Path(__file__).parent.parent.parent / "symbol" / "tests" / "fixtures" / "poly_repo"
@@ -48,21 +43,15 @@ def test_chunk_id_is_stable() -> None:
     assert len(a) == 32
 
 
-def test_chunk_and_embed_calls_sidecar(tmp_path) -> None:
-    p = tmp_path / "x.py"
-    p.write_text("def f(): pass\n" * 5)
-    walked = [_walked("x.py")]
-    fake_vec = [0.1] * 1024
-    with patch.object(em, "_embed", return_value=fake_vec) as mock_embed:
-        chunks, failed = em.chunk_and_embed(walked, repo="t", repo_root=tmp_path)
+def test_chunk_and_embed_no_vectors(tmp_path) -> None:
+    """Chunking emits text-only chunks — embedding was removed; NL→file
+    anchoring rides the chunk-text fulltext index instead."""
+    (tmp_path / "a.py").write_text("def a():\n    return 1\n")
+    walked = [_walked("a.py")]
+    chunks, failed = em.chunk_and_embed(walked, repo="t", repo_root=tmp_path)
     assert failed == []
-    assert len(chunks) >= 1
-    assert chunks[0].embed_vec == fake_vec
-    assert chunks[0].repo == "t"
-    assert chunks[0].file_path == "x.py"
-    assert mock_embed.called
-
-
+    assert chunks and chunks[0].text.startswith("def a")
+    assert not hasattr(chunks[0], "embed_vec")
 def test_chunk_and_embed_skips_too_large(tmp_path) -> None:
     p = tmp_path / "big.py"
     p.write_text("x = 0\n" * 100_000)
@@ -82,13 +71,3 @@ def test_chunk_and_embed_skips_parse_error(tmp_path) -> None:
     chunks, failed = em.chunk_and_embed(walked, repo="t", repo_root=tmp_path)
     assert chunks == []
     assert failed == []
-
-
-def test_sidecar_failure_skips_remaining_chunks(tmp_path) -> None:
-    p = tmp_path / "x.py"
-    p.write_text("\n".join(f"l{i}" for i in range(150)))
-    walked = [_walked("x.py")]
-    with patch.object(em, "_embed", side_effect=RuntimeError("sidecar down")):
-        chunks, failed = em.chunk_and_embed(walked, repo="t", repo_root=tmp_path)
-    assert chunks == []
-    assert failed == ["x.py"]

@@ -45,19 +45,26 @@ class _FakeDriver:
 VEC = [0.1] * 1024
 
 
-def test_translator_vector_topk_overfetches():
-    drv = _FakeDriver()
-    translator._vector_topk(drv, repo="R", vec=VEC, k=50)
-    cypher, params = drv.calls[0]
-    assert "$k_query" in cypher
-    assert "LIMIT $k" in cypher
-    assert params["k"] == 50
-    assert params["k_query"] == 200          # k × 4
-    drv2 = _FakeDriver()
-    translator._vector_topk(drv2, repo="R", vec=VEC, k=200)
-    assert drv2.calls[0][1]["k_query"] == 500  # capped
+def test_translator_chunk_fulltext_overfetches():
+    """Lucene ranks globally then we repo-filter — the fulltext anchor
+    must over-fetch (k×4 cap 500) exactly like the old vector path."""
+    from aiforge_memory.query import translator as tr
 
+    captured = {}
 
+    class _Sess:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def run(self, cy, **params):
+            captured.update(params)
+            return []
+
+    class _Drv:
+        def session(self): return _Sess()
+
+    tr._chunk_fulltext_topk(_Drv(), repo="r", text="find the widget", k=50)
+    assert captured["k"] == 50
+    assert captured["k_query"] == 200  # 50 × 4
 def test_bundle_fallback_recall_overfetches():
     drv = _FakeDriver()
     bundle._vector_observations(drv, repo="R", query_vec=VEC, k=5)
