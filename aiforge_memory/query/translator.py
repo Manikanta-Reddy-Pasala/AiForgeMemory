@@ -215,7 +215,7 @@ def _embed_query(text: str) -> list[float]:
 
 
 _VECTOR_CYPHER = """
-CALL db.index.vector.queryNodes('codemem_chunk_embed', $k, $vec)
+CALL db.index.vector.queryNodes('codemem_chunk_embed', $k_query, $vec)
 YIELD node AS c, score
 WHERE c.repo = $repo
 RETURN c.file_path AS file_path, c.text AS text, score
@@ -227,8 +227,12 @@ LIMIT $k
 def _vector_topk(driver, *, repo: str, vec: list[float], k: int) -> list[dict]:
     if not vec:
         return []
+    # Neo4j ranks the vector top-K globally and only then applies our
+    # repo WHERE — over-fetch the global stage so the repo filter still
+    # leaves ~k rows. k is already top_k*3-ish here, so 4× capped 500.
+    k_query = min(k * 4, 500)
     with driver.session() as s:
-        rows = list(s.run(_VECTOR_CYPHER, repo=repo, vec=vec, k=k))
+        rows = list(s.run(_VECTOR_CYPHER, repo=repo, vec=vec, k=k, k_query=k_query))
     return [dict(r) for r in rows]
 
 

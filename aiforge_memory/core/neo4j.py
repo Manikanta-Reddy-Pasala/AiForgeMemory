@@ -12,7 +12,25 @@ adds its own missing pieces.
 """
 from __future__ import annotations
 
+import os
+
 _REPO_NAME_CONSTRAINT_NAME = "codemem_repo_name_unique"
+
+
+# ─── Vector over-fetch ────────────────────────────────────────────────
+#
+# Neo4j 5.x has no filtered vector search: db.index.vector.queryNodes()
+# ranks the top-K *globally*, and only afterwards does our WHERE clause
+# drop other repos' rows. With many repos in one graph a small k can
+# return zero same-repo hits. Fix = over-fetch the global stage and keep
+# the final LIMIT at the caller's k.
+
+def vector_overfetch_k(k: int, *, cap: int = 500) -> int:
+    """Global fetch size for a repo-filtered vector query that should
+    yield ~``k`` rows after the repo filter. ``AIFORGE_VECTOR_OVERFETCH``
+    (default 10) scales it; capped (default 500) to bound index work."""
+    overfetch = int(os.environ.get("AIFORGE_VECTOR_OVERFETCH", "10"))
+    return min(max(k, 1) * max(overfetch, 1), cap)
 
 _INDEX_STATEMENTS: list[str] = [
     # B-tree index on last_indexed_at for stats

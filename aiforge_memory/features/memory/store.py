@@ -26,6 +26,8 @@ import time
 import uuid
 from collections.abc import Iterable
 
+from aiforge_memory.core.neo4j import vector_overfetch_k
+
 _SCHEMA_VERSION = "codemem-v1"
 
 _ALLOWED_LABELS = {"Decision_v2", "Observation_v2", "Note_v2", "Doc_v2"}
@@ -440,7 +442,7 @@ def list_memory(
 
 
 _RECALL_OBSERVATION = """
-CALL db.index.vector.queryNodes('codemem_observation_embed', $k, $vec)
+CALL db.index.vector.queryNodes('codemem_observation_embed', $k_query, $vec)
 YIELD node AS o, score
 WHERE o.repo = $repo
   AND (o.status IS NULL OR o.status = 'active')
@@ -470,7 +472,8 @@ def recall_observations(
         return []
     with driver.session() as s:
         return [dict(r) for r in s.run(
-            _RECALL_OBSERVATION, repo=repo, vec=query_vec, k=k,
+            _RECALL_OBSERVATION, repo=repo, vec=query_vec,
+            k=k, k_query=vector_overfetch_k(k),
         )]
 
 
@@ -491,7 +494,8 @@ def find_semantic_dup(
         return None
     with driver.session() as s:
         row = s.run(
-            _RECALL_OBSERVATION, repo=repo, vec=embed_vec, k=1,
+            _RECALL_OBSERVATION, repo=repo, vec=embed_vec,
+            k=1, k_query=vector_overfetch_k(1),
         ).single()
     if row is None:
         return None
@@ -514,7 +518,7 @@ def find_semantic_dup(
 # can swap to ``gds.pageRank.stream`` later — same return contract.
 _RECALL_OBSERVATIONS_PPR = """
 // 1. Vector recall over Observation_v2 → seed set with score.
-CALL db.index.vector.queryNodes('codemem_observation_embed', $seed_k, $vec)
+CALL db.index.vector.queryNodes('codemem_observation_embed', $seed_k_query, $vec)
 YIELD node AS seed_node, score AS vec_score
 WHERE seed_node.repo = $repo
   AND (seed_node.status IS NULL OR seed_node.status = 'active')
@@ -615,7 +619,8 @@ def recall_observations_ppr(
         return [dict(r) for r in s.run(
             _RECALL_OBSERVATIONS_PPR,
             repo=repo, vec=query_vec,
-            seed_k=seed_k, k=k, alpha=float(alpha),
+            seed_k_query=vector_overfetch_k(seed_k),
+            k=k, alpha=float(alpha),
         )]
 
 

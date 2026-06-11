@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from aiforge_memory.core.neo4j import vector_overfetch_k
 from aiforge_memory.query import fastpath, translator
 
 
@@ -544,8 +545,10 @@ def _vector_observations(
     except Exception:
         pass  # fall through to vanilla recall
 
+    # Over-fetch the global vector stage — Neo4j filters repo *after*
+    # ranking, so $k alone can come back empty on multi-repo graphs.
     cy = (
-        "CALL db.index.vector.queryNodes('codemem_observation_embed', $k, $vec) "
+        "CALL db.index.vector.queryNodes('codemem_observation_embed', $k_query, $vec) "
         "YIELD node AS o, score "
         "WHERE o.repo = $repo "
         "RETURN o.id AS id, coalesce(o.kind,'note') AS kind, "
@@ -554,7 +557,10 @@ def _vector_observations(
     )
     try:
         with driver.session() as s:
-            return [dict(r) for r in s.run(cy, repo=repo, vec=query_vec, k=k)]
+            return [dict(r) for r in s.run(
+                cy, repo=repo, vec=query_vec,
+                k=k, k_query=vector_overfetch_k(k),
+            )]
     except Exception:
         return []
 
