@@ -6,7 +6,6 @@ Tables:
                        PRIMARY KEY (repo, path))
     service_overrides (repo TEXT, name TEXT, source TEXT, payload TEXT,
                        PRIMARY KEY (repo, name))
-    query_cache       (key TEXT PK, bundle_json TEXT, expires_at REAL)
 """
 from __future__ import annotations
 
@@ -56,11 +55,6 @@ _DDL = [
         source  TEXT NOT NULL,
         payload TEXT NOT NULL,
         PRIMARY KEY (repo, name)
-    )""",
-    """CREATE TABLE IF NOT EXISTS query_cache (
-        key         TEXT PRIMARY KEY,
-        bundle_json TEXT NOT NULL,
-        expires_at  REAL NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS git_state (
         repo        TEXT PRIMARY KEY,

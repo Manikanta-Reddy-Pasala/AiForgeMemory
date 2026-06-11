@@ -193,6 +193,12 @@ def query(
     role: str = "doer",
     token_budget: int = 4000,
 ) -> ContextBundle:
+    """Build a ContextBundle for ``text`` scoped to ``repo``.
+
+    ``role`` is currently unused — kept for API compatibility with
+    callers (UnifiedContext) that already pass it; a future change may
+    use it to weight sections per consumer role.
+    """
     bundle = ContextBundle(repo=repo)
 
     # Fastpath

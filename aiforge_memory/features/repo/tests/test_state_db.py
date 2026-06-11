@@ -25,7 +25,8 @@ def test_migrate_creates_tables(db) -> None:
     assert "merkle_files" in names
     assert "merkle_repo" in names
     assert "service_overrides" in names
-    assert "query_cache" in names
+    # query_cache was dead surface (never read/written) — removed.
+    assert "query_cache" not in names
 
 
 def test_repo_hash_round_trip(db) -> None:
