@@ -671,11 +671,8 @@ def daemon_status() -> dict:
 # ─── Defaults ─────────────────────────────────────────────────────────
 
 def _default_driver():
-    from neo4j import GraphDatabase
-    uri = os.environ.get("AIFORGE_NEO4J_URI", "bolt://127.0.0.1:7687")
-    user = os.environ.get("AIFORGE_NEO4J_USER", "neo4j")
-    pw = os.environ.get("AIFORGE_NEO4J_PASSWORD", "password")
-    return GraphDatabase.driver(uri, auth=(user, pw))
+    from aiforge_memory.core.neo4j import open_driver
+    return open_driver()
 
 
 def _default_state():

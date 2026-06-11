@@ -55,13 +55,11 @@ def check_all() -> HealthReport:
 
 
 def _check_neo4j() -> CheckResult:
-    uri = os.environ.get("AIFORGE_NEO4J_URI", "bolt://127.0.0.1:7687")
-    user = os.environ.get("AIFORGE_NEO4J_USER", "neo4j")
-    pw = os.environ.get("AIFORGE_NEO4J_PASSWORD", "password")
+    from aiforge_memory.core.neo4j import neo4j_settings, open_driver
+    uri, _, _ = neo4j_settings()
     t0 = time.perf_counter()
     try:
-        from neo4j import GraphDatabase
-        drv = GraphDatabase.driver(uri, auth=(user, pw))
+        drv = open_driver()
         try:
             with drv.session() as s:
                 s.run("RETURN 1").consume()

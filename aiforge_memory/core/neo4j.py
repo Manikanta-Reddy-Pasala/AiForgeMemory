@@ -17,6 +17,37 @@ import os
 _REPO_NAME_CONSTRAINT_NAME = "codemem_repo_name_unique"
 
 
+# ─── Connection ───────────────────────────────────────────────────────
+
+def neo4j_settings() -> tuple[str, str, str]:
+    """Resolve (uri, user, password) from env at call time.
+
+    AIFORGE_NEO4J_* wins, plain NEO4J_* is the fallback, then the local
+    dev defaults. Single source of truth — every module that opens a
+    driver goes through here (or :func:`open_driver`)."""
+    uri = os.environ.get(
+        "AIFORGE_NEO4J_URI",
+        os.environ.get("NEO4J_URI", "bolt://127.0.0.1:7687"),
+    )
+    user = os.environ.get(
+        "AIFORGE_NEO4J_USER",
+        os.environ.get("NEO4J_USER", "neo4j"),
+    )
+    pw = os.environ.get(
+        "AIFORGE_NEO4J_PASSWORD",
+        os.environ.get("NEO4J_PASSWORD", "password"),
+    )
+    return uri, user, pw
+
+
+def open_driver():
+    """Open a Neo4j driver from env config. Errors propagate to caller."""
+    from neo4j import GraphDatabase
+
+    uri, user, pw = neo4j_settings()
+    return GraphDatabase.driver(uri, auth=(user, pw))
+
+
 # ─── Vector over-fetch ────────────────────────────────────────────────
 #
 # Neo4j 5.x has no filtered vector search: db.index.vector.queryNodes()
