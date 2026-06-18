@@ -156,6 +156,17 @@ _INDEX_STATEMENTS: list[str] = [
     # CALLS_REPO edges have been written.
     "CREATE INDEX codemem_calls_repo_via IF NOT EXISTS "
     "FOR ()-[r:CALLS_REPO]-() ON (r.via, r.confidence)",
+
+    # Domain / Flow / Tour (features/domain, features/tour) + ReviewFinding
+    # (features/review). All keyed per-repo; idempotent MERGE writers.
+    "CREATE CONSTRAINT codemem_domain_unique IF NOT EXISTS "
+    "FOR (d:Domain) REQUIRE (d.repo, d.name) IS UNIQUE",
+    "CREATE CONSTRAINT codemem_flow_unique IF NOT EXISTS "
+    "FOR (fl:Flow) REQUIRE (fl.repo, fl.name) IS UNIQUE",
+    "CREATE CONSTRAINT codemem_tour_unique IF NOT EXISTS "
+    "FOR (t:Tour) REQUIRE (t.repo, t.name) IS UNIQUE",
+    "CREATE INDEX codemem_review_repo_kind IF NOT EXISTS "
+    "FOR (rf:ReviewFinding) ON (rf.repo, rf.kind)",
 ]
 
 

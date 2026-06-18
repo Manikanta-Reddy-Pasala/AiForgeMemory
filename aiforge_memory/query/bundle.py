@@ -42,6 +42,9 @@ class ContextBundle:
     # Cross-repo edges crossing this query's surface
     cross_repo: list[dict] = field(default_factory=list)
     chunks: list[dict] = field(default_factory=list)
+    # Semantic domains (repo-level) + flows touching the query's symbols
+    domains: list[dict] = field(default_factory=list)
+    flows: list[dict] = field(default_factory=list)
     sources_used: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -61,6 +64,22 @@ class ContextBundle:
                     f"- **{svc['name']}** ({svc.get('role','?')})"
                     f" — {svc.get('description','')}"
                 )
+            out.append("\n".join(lines))
+
+        if self.domains:
+            lines = ["## Domains"]
+            for d in self.domains[:5]:
+                desc = (d.get("description") or "").strip()
+                svcs = ", ".join(d.get("services", [])[:6])
+                tail = (f" — {desc}" if desc else "") + (f" [{svcs}]" if svcs else "")
+                lines.append(f"- **{d['name']}**{tail}")
+            out.append("\n".join(lines))
+
+        if self.flows:
+            lines = ["## Flows"]
+            for f in self.flows[:5]:
+                steps = " → ".join(f.get("steps", [])[:8])
+                lines.append(f"- **{f['name']}**: {steps}")
             out.append("\n".join(lines))
 
         if self.runbook_md:
@@ -185,6 +204,35 @@ class ContextBundle:
         return "\n\n".join(out)
 
 
+_Q_DOMAINS = """
+MATCH (d:Domain {repo:$repo})
+OPTIONAL MATCH (d)-[:COVERS]->(s:Service)
+WITH d, collect(DISTINCT s.name) AS services
+RETURN d.name AS name, d.description AS description, services
+ORDER BY size(services) DESC, d.name LIMIT 5
+"""
+
+_Q_FLOWS = """
+MATCH (fl:Flow {repo:$repo})-[st:STEP]->(y:Symbol_v2)
+WHERE y.fqname IN $fqnames
+WITH fl, st ORDER BY st.order
+WITH fl, collect(st.label) AS steps
+RETURN fl.name AS name, fl.description AS description, steps LIMIT 5
+"""
+
+
+def _domains_for(driver, *, repo: str) -> list[dict]:
+    with driver.session() as s:
+        return [dict(r) for r in s.run(_Q_DOMAINS, repo=repo)]
+
+
+def _flows_for(driver, *, repo: str, fqnames: list[str]) -> list[dict]:
+    if not fqnames:
+        return []
+    with driver.session() as s:
+        return [dict(r) for r in s.run(_Q_FLOWS, repo=repo, fqnames=fqnames)]
+
+
 def query(
     text: str,
     *,
@@ -298,6 +346,22 @@ def query(
     # + Vector recall over observations
     anchor_paths = [f["path"] for f in bundle.files]
     anchor_syms = [s["fqname"] for s in bundle.symbols]
+
+    # Semantic domains (repo-level orientation) + flows touching the
+    # query's anchor symbols. Guarded — degrade to empty on any hiccup.
+    try:
+        bundle.domains = _domains_for(driver, repo=repo)
+        if bundle.domains:
+            bundle.sources_used.append("domains")
+    except Exception as exc:  # noqa: BLE001
+        bundle.errors.append(f"domains: {exc}")
+    if anchor_syms:
+        try:
+            bundle.flows = _flows_for(driver, repo=repo, fqnames=anchor_syms)
+            if bundle.flows:
+                bundle.sources_used.append("flows")
+        except Exception as exc:  # noqa: BLE001
+            bundle.errors.append(f"flows: {exc}")
     # Raw code chunks for focal files (Top 5 chunks)
     if anchor_paths:
         bundle.chunks = _chunks_for(

@@ -10,6 +10,7 @@ from __future__ import annotations
 from . import (
     decay,
     doctor,
+    domains,
     forget,
     handoff,
     health,
@@ -22,10 +23,12 @@ from . import (
     recall,
     recap,
     remember,
+    review,
     schedule,
     services,
     stats,
     summarise_symbols,
+    tour,
     ui,
 )
 from . import (
@@ -40,6 +43,9 @@ COMMAND_MODULES = (
     stats,
     summarise_symbols,
     services,
+    domains,
+    tour,
+    review,
     doctor,
     remember,
     recall,
